@@ -36,9 +36,18 @@ jobs:
           if (-not $IsWindows) { throw 'This validation requires native Windows.' }
           node --version
           git rev-parse HEAD
+          node -e "const fs=require('node:fs'),os=require('node:os'); console.log(JSON.stringify({configured_temp:os.tmpdir(),canonical_temp:fs.realpathSync.native(os.tmpdir())}));"
+          $testTemp = Join-Path $env:RUNNER_TEMP 'handoff-tests'
+          New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
+          $canonicalTemp = node -e "process.stdout.write(require('node:fs').realpathSync.native(process.argv[1]));" $testTemp
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the test directory.' }
+          "TEMP=$canonicalTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$canonicalTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Run standalone handoff tests
         shell: pwsh
         run: |
+          node -e "const fs=require('node:fs'),os=require('node:os'),assert=require('node:assert/strict'); const dir=os.tmpdir(); console.log('Test directory: '+dir); assert.equal(dir.toLowerCase(),fs.realpathSync.native(dir).toLowerCase());"
+          if ($LASTEXITCODE -ne 0) { throw 'Test directory must use its canonical path.' }
           node --test `
             work/maintenance/handoff-store.test.cjs `
             work/maintenance/handoff-format.test.cjs `
