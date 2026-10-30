@@ -42,7 +42,7 @@ function request(method,params,{pipePath=process.env.CODEX_APP_TOOLS_PIPE_PATH,t
 }
 async function listTools(options={}){
   const result=await request('tools/list',{threadStartKind:'all'},options);
-  if(!Array.isArray(result?.tools)||result.tools.some(t=>typeof t.name!=='string'||typeof t.namespace!=='string'||!t.inputSchema))
+  if(!Array.isArray(result?.tools)||result.tools.some(t=>typeof t?.name!=='string'||typeof t.namespace!=='string'||!t.inputSchema))
     throw failure('APP_INVALID_CATALOG',true);
   return result.tools;
 }
@@ -58,7 +58,7 @@ async function callAppTool({tool,args,threadId,turnId,callId,...options}){
   return result;
 }
 function decodeToolResult(result){
-  const blocks=result.contentItems.filter(x=>x.type==='inputText'&&typeof x.text==='string');
+  const blocks=result.contentItems.filter(x=>x?.type==='inputText'&&typeof x.text==='string');
   if(blocks.length!==1)throw failure('APP_UNSUPPORTED_RESULT_SHAPE',true);
   try{return JSON.parse(blocks[0].text);}catch{throw failure('APP_UNSUPPORTED_RESULT_SHAPE',true);}
 }

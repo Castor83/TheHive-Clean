@@ -3,7 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const {saveCheckpoint}=require('./handoff-store.cjs');
 const ensureSuccessor=(input,options)=>isolatedAdapter({home:options.codexHome,app:options.app},{enabled:false,navigate:false}).ensureSuccessor(input,options);
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
-function fixture(t,{session=crypto.randomUUID(),checkpointSession=session,central=false,sharedRoot,projectId='Fixture',checkpointWorkspace=false,checkpointRepository=false,bindTask=true}={}){
+function fixture(t,{session=crypto.randomUUID(),checkpointSession=session,central=false,sharedRoot,projectId='Fixture',checkpointWorkspace=false,checkpointRepository=false,bindTask=true,inheritedReview=false}={}){
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'thehive-desktop-fixture-'));
   t.after(()=>{assert.ok(path.resolve(dir).startsWith(path.resolve(os.tmpdir())+path.sep));fs.rmSync(dir,{recursive:true,force:true});});
   const cwd=central?path.join(dir,'workspace'):dir;
@@ -12,7 +12,7 @@ function fixture(t,{session=crypto.randomUUID(),checkpointSession=session,centra
   const git={};
   if(checkpointWorkspace)git.workspace=checkpointWorkspace===true?cwd:checkpointWorkspace;
   if(checkpointRepository)git.repository=checkpointRepository===true?cwd:checkpointRepository;
-  const cp=saveCheckpoint(root,{format_version:1,project_id:projectId,session_id:checkpointSession,expected_parent:null,...(bindTask?{chat_task:{source_ref:'human',next_step:{text:'Continue fixture work',success_criterion:'Fixture result'}}}:{}),patch:{goal:'PRIVATE_FULL_FIXTURE_MUST_NOT_ENTER_START',status:'planned',last_section:'Fixture',sources:{human:{reference:'Offline fixture only'}},...(Object.keys(git).length?{git}:{}),next_step:{text:'Continue fixture work',success_criterion:'Fixture result'}}});
+  const cp=saveCheckpoint(root,{format_version:1,project_id:projectId,session_id:checkpointSession,expected_parent:null,...(bindTask?{chat_task:{source_ref:'human',next_step:{text:'Continue fixture work',success_criterion:'Fixture result'}}}:{}),patch:{goal:'PRIVATE_FULL_FIXTURE_MUST_NOT_ENTER_START',status:'planned',last_section:'Fixture',sources:{human:{reference:'Offline fixture only'},...(inheritedReview?{manual_context_review:{path:path.join(dir,'previous-transcript.jsonl'),sha256:'a'.repeat(64)}}:{})},...(Object.keys(git).length?{git}:{}),next_step:{text:'Continue fixture work',success_criterion:'Fixture result'}}});
   const snapshot=path.join(home,'handoff-snapshots',session,'context-fixture');fs.mkdirSync(snapshot,{recursive:true});
   const working=fs.readFileSync(cp.file),transcript=Buffer.from(JSON.stringify({type:'session_meta',payload:{id:session,source:'cli'}})+'\n'+JSON.stringify({type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text:'Offline fixture request'}]}})+'\n');
   const source=path.join(home,'sessions','rollout-'+session+'.jsonl');fs.mkdirSync(path.dirname(source),{recursive:true});fs.writeFileSync(source,transcript);
@@ -145,7 +145,7 @@ test('all pipe calls share the remaining budget and catalog requests fit the exi
   // Leave room for Windows timer granularity; deliberately hold the catalog past the deadline.
   const result=await ensureSuccessor(f.input,{app:f.app,codexHome:f.home,timeoutMs:250});
   assert.equal(result.status,'fallback_required');assert.equal(f.creates(),0);
-  assert.equal(limits.length,3);assert.ok(limits.every((value,index)=>Number.isInteger(value)&&value>0&&value<=250&&(index===0||value<limits[index-1])));
+  assert.equal(limits.length,4);assert.ok(limits.every((value,index)=>Number.isInteger(value)&&value>0&&value<=250&&(index===0||value<limits[index-1])));
   releaseCatalog();await new Promise(setImmediate);assert.equal(f.creates(),0);
 });
 
@@ -187,7 +187,7 @@ test('the origin lock remains held while an unknown result is reconciled',async 
 
 function isolatedAdapter(f,policy,{cli=false,realpathSync,callerSessionId}={}){
   const adapter=path.join(__dirname,'handoff-desktop.cjs'),policyFile=path.join(__dirname,'handoff-automation-policy.json');
-  const policyFs={...fs,...(realpathSync?{realpathSync}:{}),readFileSync(file,options){
+  const policyFs={...fs,...(realpathSync?{realpathSync}:{}),statSync(file,...args){if(path.resolve(file)===policyFile)return {size:Buffer.byteLength(JSON.stringify(policy))};return fs.statSync(file,...args);},readFileSync(file,options){
     if(path.resolve(file)===policyFile){const bytes=Buffer.from(JSON.stringify(policy));return options==='utf8'?bytes.toString('utf8'):bytes;}
     return fs.readFileSync(file,options);
   }};
@@ -209,6 +209,44 @@ test('manual review accepts equivalent local path separators but rejects another
     const transcript=path.join(f.input.snapshot_path,'transcript.jsonl');
     const reviewed=variant==='foreign'?f.source:transcript.replaceAll('\\','/');
     saveCheckpoint(f.root,{format_version:1,project_id:'Fixture',session_id:f.child,expected_parent:f.cp.checkpoint_id,chat_task:{source_ref:'human',next_step:{text:'Confirm manual uptake',success_criterion:'Guarded archive'}},patch:{sources:{manual_context_review:{path:reviewed,sha256:variant==='hash'?'0'.repeat(64):manifest.transcript.sha256}}}});
+    fs.writeFileSync(path.join(f.root,f.session+'-status.json'),JSON.stringify({originThreadId:f.session,successorThreadId:f.child,projectId:f.project,project_id:'Fixture',repositoryPath:f.input.cwd,handoffRoot:f.root,checkpointId:f.cp.checkpoint_id,handoffFile:f.cp.file,phase:'successor_visible',manualAuthorization:auth,automationCancelledAt:new Date().toISOString()}));
+    f.threads.push({threadId:f.child,projectId:f.project});
+    const adapter=isolatedAdapter(f,{enabled:true,navigate:false,archive_after_takeover:true,cancel_on_new_user_message:true,projects:bindingFor(f)});
+    const result=await adapter.ensureSuccessor({...f.input,operation:'confirm_takeover',successor_session_id:f.child},{app:f.app,codexHome:f.home});
+    assert.equal(result.status,variant==='equivalent'?'archived_after_takeover':'fallback_required');
+    assert.equal(f.archives(),variant==='equivalent'?1:0);
+  }
+});
+
+
+test('session-bound manual review preserves an inherited source and still rejects wrong path or hash',async t=>{
+  for(const variant of ['equivalent','foreign','hash']){
+    const f=fixture(t,{checkpointWorkspace:true,inheritedReview:true});
+    const manifest=JSON.parse(fs.readFileSync(path.join(f.input.snapshot_path,'manifest.json')));
+    const auth={origin_session_id:f.session,successor_session_id:f.child,checkpoint_id:f.cp.checkpoint_id,snapshot_path:f.input.snapshot_path,original_snapshot_bytes:manifest.transcript.bytes};
+    fs.writeFileSync(path.join(f.input.snapshot_path,'manual-authorization.json'),JSON.stringify(auth));
+    const transcript=path.join(f.input.snapshot_path,'transcript.jsonl');
+    const reviewed=variant==='foreign'?f.source:transcript.replaceAll('\\','/');
+    saveCheckpoint(f.root,{format_version:1,project_id:'Fixture',session_id:f.child,expected_parent:f.cp.checkpoint_id,chat_task:{source_ref:'human',next_step:{text:'Confirm manual uptake',success_criterion:'Guarded archive'}},patch:{sources:{['manual_context_review_'+f.child]:{path:reviewed,sha256:variant==='hash'?'0'.repeat(64):manifest.transcript.sha256}}}});
+    fs.writeFileSync(path.join(f.root,f.session+'-status.json'),JSON.stringify({originThreadId:f.session,successorThreadId:f.child,projectId:f.project,project_id:'Fixture',repositoryPath:f.input.cwd,handoffRoot:f.root,checkpointId:f.cp.checkpoint_id,handoffFile:f.cp.file,phase:'successor_visible',manualAuthorization:auth,automationCancelledAt:new Date().toISOString()}));
+    f.threads.push({threadId:f.child,projectId:f.project});
+    const adapter=isolatedAdapter(f,{enabled:true,navigate:false,archive_after_takeover:true,cancel_on_new_user_message:true,projects:bindingFor(f)});
+    const result=await adapter.ensureSuccessor({...f.input,operation:'confirm_takeover',successor_session_id:f.child},{app:f.app,codexHome:f.home});
+    assert.equal(result.status,variant==='equivalent'?'archived_after_takeover':'fallback_required');
+    assert.equal(f.archives(),variant==='equivalent'?1:0);
+  }
+});
+
+
+test('renewed manual review preserves earlier reviews of the same successor',async t=>{
+  for(const variant of ['equivalent','foreign','hash']){
+    const f=fixture(t,{checkpointWorkspace:true,inheritedReview:true});
+    const manifest=JSON.parse(fs.readFileSync(path.join(f.input.snapshot_path,'manifest.json')));
+    const auth={origin_session_id:f.session,successor_session_id:f.child,checkpoint_id:f.cp.checkpoint_id,snapshot_path:f.input.snapshot_path,original_snapshot_bytes:manifest.transcript.bytes};
+    fs.writeFileSync(path.join(f.input.snapshot_path,'manual-authorization.json'),JSON.stringify(auth));
+    const transcript=path.join(f.input.snapshot_path,'transcript.jsonl');
+    const reviewed=variant==='foreign'?f.source:transcript.replaceAll('\\','/');
+    saveCheckpoint(f.root,{format_version:1,project_id:'Fixture',session_id:f.child,expected_parent:f.cp.checkpoint_id,chat_task:{source_ref:'human',next_step:{text:'Confirm manual uptake',success_criterion:'Guarded archive'}},patch:{sources:{['manual_context_review_'+f.child]:{path:f.source,sha256:'b'.repeat(64)},['manual_context_review_'+f.child+'_'+manifest.transcript.sha256]:{path:reviewed,sha256:variant==='hash'?'0'.repeat(64):manifest.transcript.sha256}}}});
     fs.writeFileSync(path.join(f.root,f.session+'-status.json'),JSON.stringify({originThreadId:f.session,successorThreadId:f.child,projectId:f.project,project_id:'Fixture',repositoryPath:f.input.cwd,handoffRoot:f.root,checkpointId:f.cp.checkpoint_id,handoffFile:f.cp.file,phase:'successor_visible',manualAuthorization:auth,automationCancelledAt:new Date().toISOString()}));
     f.threads.push({threadId:f.child,projectId:f.project});
     const adapter=isolatedAdapter(f,{enabled:true,navigate:false,archive_after_takeover:true,cancel_on_new_user_message:true,projects:bindingFor(f)});
@@ -718,4 +756,50 @@ test('global scope rejects a foreign journal app project before known or uncerta
     assert.equal((await adapter.ensureSuccessor(f.input,{app:f.app,codexHome:f.home})).status,'fallback_required');
     assert.equal(f.creates(),0);assert.equal(f.navigations(),0);assert.equal(f.catalogReads(),0);
   }
+});
+
+
+test('numbered successor notices preserve the original name and journal lineage',async t=>{
+ const f=fixture(t,{checkpointWorkspace:true}),base=f.app.callAppTool,renames=[];
+ f.app.listTools=async()=>['list_projects','list_threads','create_thread','navigate_to_codex_page','read_thread','set_thread_archived','set_thread_title'].map(name=>({name,namespace:'fixture'}));
+ f.app.callAppTool=async call=>{if(call.tool.name==='set_thread_title'){renames.push(call.args);return {threadId:call.args.threadId,title:call.args.title};}const r=await base(call);if(call.tool.name==='read_thread')r.thread.title='Original fixture';return r;};
+ const adapter=isolatedAdapter(f,{...conditionalPolicy(f),visible_notice:true});
+ assert.equal((await adapter.ensureSuccessor(f.input,{app:f.app,codexHome:f.home})).status,'successor_visible');
+ const j=JSON.parse(fs.readFileSync(path.join(f.root,f.session+'-status.json')));
+ assert.equal(j.naming.base_title,'Original fixture');assert.equal(j.naming.sequence,1);
+ assert.ok(renames.some(r=>r.threadId===f.child&&r.title==='[Hier weiter] Original fixture · 2'));
+});
+
+
+test('manual successor receives the inherited numbered original title',async t=>{
+  const f=fixture(t,{checkpointWorkspace:true}),adapter=isolatedAdapter(f,conditionalPolicy(f));
+  const base=f.app.callAppTool,renames=[];
+  f.app.listTools=async()=>['list_projects','list_threads','read_thread','set_thread_archived','set_thread_title'].map(name=>({name,namespace:'fixture'}));
+  f.app.callAppTool=async call=>{if(call.tool.name==='set_thread_title'){renames.push(call.args);return {threadId:call.args.threadId,title:call.args.title};}const r=await base(call);if(call.tool.name==='read_thread')r.thread.title='Original manual';return r;};
+  appendUser(f);
+  assert.equal((await adapter.ensureSuccessor(f.input,{app:f.app,codexHome:f.home})).reason_code,'new_user_message_after_snapshot');
+  assert.equal(f.creates(),0);assert.equal(f.archives(),0);
+  const manualFile=path.join(__dirname,'handoff-manual-start.cjs'),mod={exports:{}};
+  const localRequire=name=>name==='./codex-app-pipe.cjs'?f.app:require(name);
+  localRequire.main={};
+  new Function('require','module','process',fs.readFileSync(manualFile,'utf8'))(localRequire,mod,{env:{CODEX_THREAD_ID:f.child,CODEX_HOME:f.home},cwd:()=>f.input.cwd});
+  const offer=mod.exports.offerManualStart(f.input,{codexHome:f.home});
+  f.threads.push({threadId:f.child,projectId:f.project});
+  const accepted=await mod.exports.acceptManualStart({operation:'accept',offer_file:offer.manual_start_file.replace(/\.md$/,'.json'),turn_id:crypto.randomUUID(),human_requested:true});
+  assert.equal(accepted.status,'manual_successor_bound');
+  assert.ok(renames.some(r=>r.threadId===f.child&&r.title==='Original manual · 2'));
+  assert.equal(accepted.naming.successor_title,'Original manual · 2');
+  assert.deepEqual(fs.readFileSync(accepted.transcript_copy),fs.readFileSync(f.source));
+  assert.ok(fs.statSync(accepted.transcript_copy).size>accepted.original_snapshot_bytes);
+  const j=JSON.parse(fs.readFileSync(path.join(f.root,f.session+'-status.json')));
+  assert.equal(j.automationCancelReason,'new_user_message_after_snapshot');
+  const previousHome=process.env.CODEX_HOME;let loaded;
+  try{process.env.CODEX_HOME=f.home;loaded=require('./handoff-store.cjs').resumeChatContinuation(f.root,{session_id:f.child,workspace:f.input.cwd,handoff_file:j.handoffFile});}
+  finally{if(previousHome===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=previousHome;}
+  assert.equal(loaded.continuation.origin_session_id,f.session);
+  saveCheckpoint(f.root,{format_version:1,project_id:'Fixture',session_id:f.child,expected_parent:f.cp.checkpoint_id,chat_task:{source_ref:'human',next_step:{text:'Finish authorized manual takeover',success_criterion:'Archive once after review'}},patch:{sources:{manual_context_review:{path:accepted.transcript_copy,sha256:accepted.sha256,summary:'Entire new user message retained and reviewed'}}}});
+  const close={...f.input,operation:'confirm_takeover',successor_session_id:f.child,turn_id:crypto.randomUUID()};
+  assert.equal((await adapter.ensureSuccessor(close,{app:f.app,codexHome:f.home})).status,'archived_after_takeover');
+  assert.equal((await adapter.ensureSuccessor(close,{app:f.app,codexHome:f.home})).status,'archived_after_takeover');
+  assert.equal(f.archives(),1);assert.equal(f.creates(),0);
 });

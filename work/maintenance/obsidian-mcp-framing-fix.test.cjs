@@ -1,8 +1,8 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm');
-const {patched}=require('./obsidian-mcp-framing-fix.cjs');
-const source=fs.readFileSync('C:/TheHive/.obsidian/plugins/vault-as-mcp/main.js','utf8');
+const {patched,prepare}=require('./obsidian-mcp-framing-fix.cjs');
+const source='this.server.post("/mcp",async(l,o)=>{let u=await this.mcpHandler.handleRequest(l.body);this.logger.debug("Sending response for:",l.method,l.id),o.code(200).header("Content-Type","application/json").send(u)}),this.port=this.current.serverPort()';
 function routeFrom(text,response){
   const start=text.indexOf('this.server.post("/mcp",');
   const end=text.indexOf('}),this.port=this.current.serverPort()',start);
@@ -29,4 +29,19 @@ test('unexpected, repeated or already patched source cannot be rewritten',()=>{
   assert.throws(()=>patched('different installed source'),/refused/);
   assert.throws(()=>patched(source+source),/refused/);
   assert.throws(()=>patched(patched(source)),/refused/);
+});
+
+test('preparation creates its report directory in a fresh isolated vault',()=>{
+  const os=require('node:os'),path=require('node:path');
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'thehive-obsidian-fixture-'));
+  try{
+    const plugin=path.join(root,'.obsidian/plugins/vault-as-mcp');fs.mkdirSync(plugin,{recursive:true});
+    fs.writeFileSync(path.join(plugin,'manifest.json'),JSON.stringify({id:'vault-as-mcp',version:'1.2.1'}));
+    fs.writeFileSync(path.join(plugin,'main.js'),source);
+    const report=prepare(root);
+    assert.equal(report.applied,false);
+    assert.equal(fs.readFileSync(path.join(plugin,'main.js'),'utf8'),source);
+    assert.equal(fs.existsSync(path.join(root,'work/verification/obsidian-mcp-framing-repair-plan-20261026.json')),true);
+    assert.equal(fs.readFileSync(report.candidate,'utf8'),patched(source));
+  }finally{assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir())+path.sep));fs.rmSync(root,{recursive:true,force:true});}
 });

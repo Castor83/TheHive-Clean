@@ -163,3 +163,18 @@ test('literal percent sequences in wikilink filenames are not URL decoded', asyn
   expect(f.read('20_Wissen/Vaultindex.md')).toBe(before);
   expect(f.writes).toHaveLength(n);
 });
+
+test('vanishing non-Markdown transaction files cannot abort vault inventory',async()=>{
+  const f=fixture(),rel='work/handoff/index.json.test.pending';f.put(rel,'temporary transaction');
+  const pending=path.join(f.vault,rel),dir=path.dirname(pending),read=fs.readdirSync;
+  let removed=false;
+  (fs as any).readdirSync=function(file:any,...args:any[]){
+    const entries=(read as any).call(this,file,...args);
+    if(file===dir&&!removed){fs.unlinkSync(pending);removed=true;}
+    return entries;
+  };
+  try{
+    const result=await syncNavigation({vault:f.vault,preview:true});
+    expect(removed).toBe(true);expect(result.status).toBe('preview_only');
+  }finally{fs.readdirSync=read;}
+});

@@ -207,7 +207,15 @@ function withLock(root, fn) {
   const gate = safe(root, '.lock-gate');
   let gateFd, fd;
   const token = crypto.randomUUID();
-  try { gateFd = fs.openSync(gate, 'wx'); } catch { throw Error('Lock acquisition busy; retained gate needs owner inspection after a crash'); }
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  for (let retries = 0; ; retries++) {
+    try { gateFd = fs.openSync(gate, 'wx'); break; }
+    catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      if (retries >= 20) throw Error('Lock acquisition busy; retry limit reached');
+      Atomics.wait(wait, 0, 0, 10);
+    }
+  }
   try {
     fs.writeFileSync(gateFd, JSON.stringify({ pid: process.pid, host: os.hostname(), token }));
     if (fs.existsSync(file)) {
@@ -225,13 +233,19 @@ function withLock(root, fn) {
       fs.fsyncSync(fd);
     } catch (e) { fs.closeSync(fd); fd = undefined; fs.unlinkSync(file); throw e; }
   } finally { fs.closeSync(gateFd); fs.unlinkSync(gate); }
+  let result, operationError, failed = false;
+  try { recover(root); result = fn(); }
+  catch (error) { operationError = error; failed = true; }
   try {
-    recover(root); return fn();
-  } finally {
     fs.closeSync(fd);
     if (json(root, '.writer.lock').token !== token) throw Error('Writer lock ownership changed; refusing cleanup');
     fs.unlinkSync(file);
+  } catch (cleanupError) {
+    if (!failed) throw cleanupError;
+    if (operationError && typeof operationError === 'object') operationError.lockCleanupError = cleanupError;
   }
+  if (failed) throw operationError;
+  return result;
 }
 function currentIndex(root) {
   if (!fs.existsSync(safe(root, 'index.json'))) return { format_version: 1, projects: {} };

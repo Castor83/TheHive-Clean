@@ -167,7 +167,7 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
       if(confirming&&state.manualAuthorization){
         try{
           const context=require('./handoff-manual-start.cjs').manualContext(state,input.successor_session_id,home);
-          const reviewed=cp.state.sources?.manual_context_review;
+          const reviewed=cp.state.sources?.['manual_context_review_'+input.successor_session_id+'_'+context.sha256] ?? cp.state.sources?.['manual_context_review_'+input.successor_session_id] ?? cp.state.sources?.manual_context_review;
           if(real(reviewed?.path)!==real(context.transcript_copy)||reviewed?.sha256!==context.sha256)throw Error('Manual context review missing');
           return null;
         }catch{return {status:'fallback_required',successor_thread_id:state.successorThreadId||null,reason_code:'manual_context_review_required'};}
@@ -222,10 +222,20 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
       const key=threadId+':'+label;
       if((state.noticeAttempts||[]).includes(key))return;
       save(state.phase||'snapshot_ready',{noticeAttempts:[...(state.noticeAttempts||[]).slice(-15),key]});
-      const base=threadId===input.session_id?(state.originTitle||cp.project_id):cp.project_id+' – Fortsetzung';
+      const base=threadId===input.session_id?(state.naming?.current_title||state.originTitle||cp.project_id):(state.naming?.successor_title||cp.project_id+' – Fortsetzung');
       try{await call('set_thread_title',{threadId,title:('['+label+'] '+base).slice(0,240)});}catch{}
     }
     const initialBlock=fresh();if(initialBlock){await visibleNotice('Übergabe angehalten');return initialBlock;}
+    if(!confirming&&!state.naming){
+      let title=state.originTitle;
+      if(!title){
+        const origin=await call('read_thread',{threadId:input.session_id,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:200});
+        if(origin.thread?.id!==input.session_id)throw Error('Naming origin identity mismatch');
+        title=origin.thread.title;
+      }
+      const naming=await require('./handoff-naming.cjs').resolveAppNaming({root,session_id:input.session_id,project_id:cp.project_id,workspace:cwd,title:title||cp.project_id},async id=>(await call('read_thread',{threadId:id,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:200})).thread);
+      save(state.phase||'snapshot_ready',{originTitle:title||cp.project_id,naming});
+    }
     if(resumingCreation&&creationCaller!==input.session_id){
       if(!project)project=await exactProject();
       const catalog=await call('list_threads',{limit:50});

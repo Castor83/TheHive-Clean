@@ -10,7 +10,7 @@ from unittest import mock
 import uuid
 
 HERE = Path(__file__).resolve().parent
-CANDIDATE = HERE.parent / 'verification/precompact-reviewed-source-20261027.py'
+CANDIDATE = HERE / 'fixtures/precompact-reviewed-source-20261027.py'
 
 
 def load(path, name):
@@ -270,8 +270,8 @@ class GuardDesktopBindingTests(unittest.TestCase):
         self.base = old.ContextGuardTests('runTest')
         self.base.setUp()
         self.addCleanup(self.base.doCleanups)
-        shutil.copyfile(CANDIDATE, self.base.home / 'hooks/pre-compaction-snapshot.py')
-        self.snapshot = load(CANDIDATE, 'guard_snapshot_candidate')
+        shutil.copyfile(old.SNAPSHOT_SOURCE, self.base.home / 'hooks/pre-compaction-snapshot.py')
+        self.snapshot = load(old.SNAPSHOT_SOURCE, 'guard_snapshot_candidate')
         self.base.event['turn_id'] = str(uuid.uuid4())
 
     def test_threshold_pass_invokes_existing_adapter_and_returns_stop(self):

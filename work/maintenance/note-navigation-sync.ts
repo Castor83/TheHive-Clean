@@ -24,6 +24,8 @@ function inventory(vault: string) {
       const abs = path.join(dir, entry.name);
       const rel = path.relative(vault, abs).replace(/\\/g, '/');
       if (entry.name.startsWith('.')) { if (entry.isDirectory()) excluded.push({ path: rel, reason: 'hidden administration/archive' }); continue; }
+      // Non-Markdown transaction files may disappear after readdir; they are not inventory sources.
+      if (entry.isFile() && !/\.md$/i.test(entry.name)) continue;
       const stat = fs.lstatSync(abs);
       if (stat.isSymbolicLink() || stat.isFile() && stat.nlink > 1) { excluded.push({ path: rel, reason: 'link/reparse target not followed' }); continue; }
       if (stat.isDirectory()) walk(abs);

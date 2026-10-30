@@ -5,17 +5,19 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 import uuid
 
 HERE = Path(__file__).parent
+SNAPSHOT_SOURCE = HERE / "fixtures/pre-compaction-snapshot.py"
 
 
 class ContextGuardTests(unittest.TestCase):
     def test_python_node_boundary_preserves_waiting_status_and_failure_reason(self):
-        spec = importlib.util.spec_from_file_location('precompact_boundary', Path.home() / '.codex/hooks/pre-compaction-snapshot.py')
+        spec = importlib.util.spec_from_file_location('precompact_boundary', SNAPSHOT_SOURCE)
         helper = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(helper)
         self.store.mkdir(parents=True)
@@ -33,7 +35,7 @@ class ContextGuardTests(unittest.TestCase):
             self.assertEqual(actual, expected)
 
     def test_precompact_waiting_notice_matches_deferred_visible_switch(self):
-        spec = importlib.util.spec_from_file_location('precompact_notice', Path.home() / '.codex/hooks/pre-compaction-snapshot.py')
+        spec = importlib.util.spec_from_file_location('precompact_notice', SNAPSHOT_SOURCE)
         helper = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(helper)
         with mock.patch.object(helper, 'capture_snapshot', return_value={'status': 'PASS', 'snapshot_path': str(self.root)}), \
@@ -59,7 +61,7 @@ class ContextGuardTests(unittest.TestCase):
         self.assertIn('Weiterleitung läuft', result['systemMessage'])
         context = result['hookSpecificOutput']['additionalContext']
         self.assertIn('Schlussantwort', context)
-        self.assertIn('Keine weiteren Werkzeuge', context)
+        self.assertIn('Keine weitere Facharbeit', context)
         self.assertNotIn('waiting_for_origin', context)
         self.assertNotIn('Details:', context)
 
@@ -76,7 +78,7 @@ class ContextGuardTests(unittest.TestCase):
         self.cwd.mkdir()
         (self.home / 'sessions').mkdir(parents=True)
         (self.home / 'hooks').mkdir()
-        shutil.copyfile(Path.home() / '.codex/hooks/pre-compaction-snapshot.py',
+        shutil.copyfile(SNAPSHOT_SOURCE,
                         self.home / 'hooks/pre-compaction-snapshot.py')
         self.session = str(uuid.uuid4())
         self.transcript = self.home / 'sessions' / ('rollout-fixture-' + self.session + '.jsonl')
@@ -112,6 +114,127 @@ console.log(JSON.stringify({checkpoint_id:r.checkpoint_id,file:r.file,sha256:r.s
 
     def handle(self):
         return self.guard.handle_event(self.event, codex_home=self.home, handoff_root=self.store)
+
+    def test_workspace_failure_is_actionable_and_stop_is_scoped_to_this_turn(self):
+        self.usage(850)
+        cp = self.checkpoint()
+        other = self.root / 'different-workspace'
+        other.mkdir()
+        code = "const s=require(process.argv[1]);s.saveCheckpoint(process.argv[2],{format_version:1,project_id:'Fixture',session_id:process.argv[3],expected_parent:process.argv[4],patch:{git:{workspace:process.argv[5]}}});"
+        subprocess.run(['node', '-e', code, str(HERE / 'handoff-store.cjs'), str(self.store), self.session,
+                        cp['checkpoint_id'], str(other)], check=True, capture_output=True)
+        result = self.handle()
+        self.assertIn('Arbeitsordner', result['systemMessage'])
+        context = result['hookSpecificOutput']['additionalContext']
+        self.assertIn(self.event['turn_id'], context)
+        self.assertIn('jetzt sichern', context)
+        self.assertNotIn(str(other), result['systemMessage'])
+
+    def test_manual_save_works_without_usage_or_automatic_announcement_and_never_creates(self):
+        self.usage(None, announced=False)
+        self.checkpoint()
+        helpers = self.guard._helpers(self.home)
+        with mock.patch.object(self.guard, '_helpers', return_value=helpers), \
+             mock.patch.object(helpers, '_desktop_successor', return_value={'status':'fallback_required'}) as launch:
+            result = self.guard.handle_event(self.event, codex_home=self.home, handoff_root=self.store, manual_save=True)
+        self.assertIn('Arbeitsstand gesichert', result['systemMessage'])
+        self.assertTrue(launch.call_args.kwargs['offer_only'])
+        manifest = json.loads((self.home / 'handoff-snapshots' / self.session / 'context-latest.json').read_text())
+        self.assertEqual(manifest['trigger'], 'manual')
+
+    def test_manual_new_turn_retries_failed_copy_preserving_failed_attempt(self):
+        self.usage(850)
+        self.checkpoint()
+        helpers = self.guard._helpers(self.home)
+        with mock.patch.object(self.guard, '_helpers', return_value=helpers):
+            with mock.patch.object(helpers, '_copy_prefix', side_effect=OSError('fixture disk failure')):
+                failed = self.handle()
+            self.assertIn('NICHT bestaetigt', failed['stopReason'])
+            parent = self.home / 'handoff-snapshots' / self.session
+            previous = json.loads((parent / 'context-last-attempt.json').read_text())
+            self.event['turn_id'] = str(uuid.uuid4())
+            result = self.guard.handle_event(self.event, codex_home=self.home, handoff_root=self.store, manual_save=True)
+        self.assertIn('Arbeitsstand gesichert', result['systemMessage'])
+        current = json.loads((parent / 'context-last-attempt.json').read_text())
+        retained = json.loads((parent / current['previous_attempt']['file']).read_text())
+        self.assertEqual(retained, previous)
+        self.assertEqual(current['status'], 'verified')
+
+    def test_posttool_after_manual_save_cannot_start_automatic_switch(self):
+        self.usage(850, announced=False)
+        self.checkpoint()
+        helpers = self.guard._helpers(self.home)
+        with mock.patch.object(self.guard, '_helpers', return_value=helpers), \
+             mock.patch.object(helpers, '_desktop_successor', return_value={'status':'fallback_required'}) as launch:
+            self.guard.handle_event(self.event, codex_home=self.home, handoff_root=self.store, manual_save=True)
+            launch.reset_mock()
+            result = self.handle()
+        launch.assert_not_called()
+        self.assertIn('Arbeitsstand gesichert', result['systemMessage'])
+        self.assertNotIn(self.guard.ANNOUNCEMENT, result['systemMessage'])
+
+    def manual_cli(self, caller):
+        # Isolated copy changes only the fixture store locator. All real code
+        # and snapshot/Store readers are used, without any app mutation.
+        script = self.root / 'manual-guard-fixture.py'
+        source = (HERE / 'context-handoff-guard.py').read_text(encoding='utf-8')
+        source = source.replace('HERE = Path(__file__).resolve().parent', 'HERE = Path(' + repr(str(HERE)) + ')')
+        source = source.replace("DEFAULT_ROOT = HERE.parent / 'handoff'", 'DEFAULT_ROOT = Path(' + repr(str(self.store)) + ')')
+        script.write_text(source, encoding='utf-8')
+        return subprocess.run([sys.executable, str(script), '--manual-save'], cwd=self.cwd,
+            input=json.dumps(self.event), capture_output=True, text=True, encoding='utf-8', timeout=15,
+            env={**os.environ, 'CODEX_HOME':str(self.home), 'CODEX_THREAD_ID':caller})
+
+    def test_manual_cli_real_roundtrip_saves_and_returns_manual_start(self):
+        self.usage(None, announced=False)
+        self.checkpoint()
+        result = self.manual_cli(self.session)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertIn('Arbeitsstand gesichert', output['systemMessage'])
+        self.assertIn('codex://threads/new?', output['systemMessage'])
+        manifest = json.loads((self.home / 'handoff-snapshots' / self.session / 'context-latest.json').read_text())
+        self.assertFalse(manifest['model_called'])
+        self.assertFalse(manifest['chat_created'])
+
+    def test_manual_cli_foreign_caller_cannot_save_another_session(self):
+        self.usage(850)
+        self.checkpoint()
+        result = self.manual_cli(str(uuid.uuid4()))
+        self.assertEqual(result.returncode, 0)
+        output = json.loads(result.stdout)
+        self.assertNotIn('Arbeitsstand gesichert', output['systemMessage'])
+        self.assertFalse((self.home / 'handoff-snapshots' / self.session / 'context-latest.json').exists())
+
+    def test_new_explicit_save_command_is_not_intercepted_before_checkpoint_repair(self):
+        self.usage(850, announced=False)
+        with self.transcript.open('a', encoding='utf-8') as h:
+            h.write(json.dumps(dict(type='response_item', payload=dict(role='user',
+                         content=[dict(type='input_text', text='jetzt sichern\n')]))) + '\n')
+        with mock.patch.object(self.guard, '_capture') as capture:
+            result = self.handle()
+        capture.assert_not_called()
+        self.assertNotIn('continue', result)
+        context = result['hookSpecificOutput']['additionalContext']
+        self.assertIn('--manual-save', context)
+        self.assertNotIn(self.guard.ANNOUNCEMENT, context)
+
+    def test_tool_output_cannot_pretend_to_be_a_manual_user_command(self):
+        self.usage(850, announced=False)
+        with self.transcript.open('a', encoding='utf-8') as h:
+            h.write(json.dumps(dict(type='response_item', payload=dict(role='tool',
+                         content=[dict(type='input_text', text='jetzt sichern\n')]))) + '\n')
+        result = self.handle()
+        self.assertIn(self.guard.ANNOUNCEMENT, result['hookSpecificOutput']['additionalContext'])
+
+    def test_manual_user_command_from_another_turn_does_not_suspend_automation(self):
+        self.usage(850, announced=False)
+        with self.transcript.open('a', encoding='utf-8') as h:
+            h.write(json.dumps(dict(type='response_item', payload=dict(role='user',
+                         content=[dict(type='input_text', text='jetzt sichern\n')]))) + '\n')
+        self.event['turn_id'] = str(uuid.uuid4())
+        result = self.handle()
+        self.assertIn(self.guard.ANNOUNCEMENT, result['hookSpecificOutput']['additionalContext'])
 
     def test_threshold_announces_before_snapshot_or_app_and_then_completes(self):
         self.usage(850, announced=False)
@@ -197,6 +320,25 @@ patch:{last_section:'Parallel new regression'}});
         self.assertIn(str(self.store / 'Fixture/history'), start)
         self.assertEqual((self.store / 'index.json').read_bytes(), index_before)
         self.assertEqual((self.store / 'Fixture/current.md').read_bytes(), current_before)
+
+    def test_obsolete_inline_profile_cannot_override_current_compact_limit(self):
+        (self.home / 'config.toml').write_text(
+            'model_auto_compact_token_limit = 900\nprofile = "legacy"\n'
+            '[profiles.legacy]\nmodel_auto_compact_token_limit = 500\n', encoding='utf-8')
+        self.assertEqual(self.guard._compact_limit(self.home, self.cwd, 1000), 900)
+
+    def test_project_profile_keys_cannot_select_a_legacy_compact_limit(self):
+        (self.home / 'config.toml').write_text('model_auto_compact_token_limit = 900\n', encoding='utf-8')
+        project = self.cwd / '.codex'
+        project.mkdir()
+        (project / 'config.toml').write_text(
+            'model_auto_compact_token_limit = 700\nprofile = "legacy"\n'
+            '[profiles.legacy]\nmodel_auto_compact_token_limit = 200\n', encoding='utf-8')
+        self.assertEqual(self.guard._compact_limit(self.home, self.cwd, 1000), 700)
+
+    def test_unselected_profile_file_is_not_invented_as_active(self):
+        (self.home / 'review.config.toml').write_text('model_auto_compact_token_limit = 200\n', encoding='utf-8')
+        self.assertEqual(self.guard._compact_limit(self.home, self.cwd, 1000), 1000)
 
     def test_smaller_configured_compact_limit_is_used(self):
         self.usage(399)

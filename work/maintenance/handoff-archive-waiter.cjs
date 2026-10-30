@@ -29,7 +29,11 @@ async function completePending(input,{complete=ensureSuccessor,app=require('./co
     throw error;
   }
 }
-module.exports={completePending};
+function failureTitle(journal,reason){
+  const base=require('./handoff-naming.cjs').cleanTitle(journal?.naming?.current_title||journal?.originTitle||'');
+  return ('[Weiterleitung fehlgeschlagen] '+(base?Array.from(base).slice(0,120).join('')+' – ':'')+reason+' – manuellen Start verwenden').slice(0,240);
+}
+module.exports={completePending,failureTitle};
 if(require.main===module){
   let data='',bytes=0;process.stdin.setEncoding('utf8');
   process.stdin.on('data',chunk=>{bytes+=Buffer.byteLength(chunk);if(bytes>65536)process.exit(1);data+=chunk;});
@@ -42,7 +46,8 @@ if(require.main===module){
         try{
           const app=require('./codex-app-pipe.cjs'),tools=await app.listTools({timeoutMs:3000}),tool=tools.find(t=>t.name==='set_thread_title');
           const reasons={new_user_message_after_snapshot:'Neue Nachricht',snapshot_unverifiable:'Nachrichtenprüfung fehlgeschlagen',origin_did_not_finish:'Bisheriger Lauf nicht beendet',successor_not_visible:'Neuer Chat nicht bestätigt',creation_wait_failed:'Hintergrundstart fehlgeschlagen',chat_task_unbound:'Auftrag nicht zugeordnet',app_access_failed:'App-Zugriff fehlgeschlagen',navigation_failed:'Öffnen fehlgeschlagen'};
-          if(tool)await app.callAppTool({tool,args:{threadId:input.session_id,title:('[Weiterleitung fehlgeschlagen] '+(reasons[result.reason_code]||'Ursache nicht übermittelt')+' – manuellen Start verwenden').slice(0,240)},threadId:input.caller_session_id||input.session_id,turnId:input.turn_id,callId:require('node:crypto').randomUUID(),timeoutMs:3000});
+          let journal={};try{journal=JSON.parse(require('node:fs').readFileSync(require('node:path').join(input.handoff_root,input.session_id+'-status.json'),'utf8'));}catch{}
+          if(tool)await app.callAppTool({tool,args:{threadId:input.session_id,title:failureTitle(journal,reasons[result.reason_code]||'Ursache nicht übermittelt')},threadId:input.caller_session_id||input.session_id,turnId:input.turn_id,callId:require('node:crypto').randomUUID(),timeoutMs:3000});
         }catch{}
       }
     }catch{process.exitCode=1;}

@@ -62,6 +62,7 @@ if (owner?.alive) {
 let previousStages;
 try { previousStages = previousState().stages; }
 catch (error) { console.error(error.message); process.exitCode = 1; return; }
+const python = fs.readFileSync(path.join(ROOT, 'graphify-out/.graphify_python'), 'utf8').trim();
 if (owner) fs.renameSync(LOCK, LOCK + '.' + Date.now() + '.stale');
 fs.writeFileSync(LOCK, JSON.stringify({ pid: process.pid, started_at: now(), mode, entry: __filename }), { flag: 'wx' });
 if (fs.existsSync(STOP)) fs.unlinkSync(STOP);
@@ -70,7 +71,6 @@ const state = { pid: process.pid, started_at: now(), mode, status: 'starting', s
   policy: { new_models: false, downloads: false, cloud_calls: false, qmd_embedding: 'existing-local-Qwen; packaged CUDA with sufficient free VRAM, otherwise CPU', synthetic_feedback: false } };
 const save = () => atomic(STATE, state);
 const powershell = path.join(process.env.SystemRoot || 'C:/Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe');
-const python = fs.readFileSync(path.join(ROOT, 'graphify-out/.graphify_python'), 'utf8').trim();
 const stages = [
   { name: 'results', exe: 'C:/Users/USER/.bun/bin/bun.exe', args: [path.join(DIR, 'project-knowledge-sync.ts')], timeout: 60000,
     env: { VAULT_AGENT_NAME: 'codex-desktop-agent' } },
@@ -84,14 +84,20 @@ function run(stage) {
   return new Promise(resolve => {
     const started = now();
     const child = spawn(stage.exe, stage.args, { cwd: ROOT, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...stage.env } });
-    let stdout = '', stderr = '', error = null, timedOut = false, settled = false;
+    let stdout = '', parseBuffer = '', resultTooLarge = false, stderr = '', error = null, timedOut = false, settled = false;
     const timer = setTimeout(() => {
       timedOut = true;
       // Only this directly spawned process tree is ours; stop descendants too.
       if (process.platform === 'win32' && child.pid) execFile('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {});
       else child.kill();
     }, stage.timeout);
-    child.stdout.on('data', value => { stdout = (stdout + value).slice(-32768); });
+    child.stdout.on('data', value => {
+      stdout = (stdout + value).slice(-32768);
+      if (!resultTooLarge) {
+        if (parseBuffer.length + String(value).length > 1048576) { resultTooLarge = true; parseBuffer = ''; }
+        else parseBuffer += value;
+      }
+    });
     child.stderr.on('data', value => { stderr = (stderr + value).slice(-32768); });
     child.on('error', e => { error = e.message; });
     const hardTimer = setTimeout(() => finish(1, 'unconfirmed-child-close'), stage.timeout + 10000);
@@ -100,7 +106,8 @@ function run(stage) {
       settled = true; clearTimeout(timer); clearTimeout(hardTimer);
       child.stdout.destroy(); child.stderr.destroy();
       let result = null;
-      try { result = JSON.parse(stdout.trim()); } catch { /* preserve bounded diagnostic output */ }
+      if (resultTooLarge) { if (exit_code === 0) exit_code = 1; error = 'Maintenance stage result exceeds size limit'; }
+      else try { result = JSON.parse(parseBuffer.trim()); } catch { /* preserve bounded diagnostic output */ }
       if (result && ['failed', 'deferred', 'locked', 'apply_failed_or_unverified'].includes(result.state ?? result.status)) {
         if (exit_code === 0) exit_code = 1;
         error = result.error ?? ('Maintenance stage is ' + (result.state ?? result.status));

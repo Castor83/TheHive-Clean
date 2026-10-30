@@ -37,7 +37,7 @@ def _positive(value):
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
-def _observe(event, home, helpers, decision, usage=None, error_code=None, announcement=None):
+def _observe(event, home, helpers, decision, usage=None, error_code=None, announcement=None, save_error_code=None):
     """One bounded last-invocation record; never log prompts, inputs or outputs."""
     try:
         directory = home / 'handoff-snapshots' / event['session_id']
@@ -54,6 +54,8 @@ def _observe(event, home, helpers, decision, usage=None, error_code=None, announ
             record['usage_error_code'] = error_code
         if announcement is not None:
             record['announcement'] = announcement
+        if save_error_code is not None:
+            record['save_error_code'] = save_error_code
         for key in ('turn_id', 'tool_use_id', 'tool_name'):
             if isinstance(event.get(key), str):
                 record[key] = event[key][:160]
@@ -102,6 +104,34 @@ def _announcement_seen(event, transcript):
     return seen
 
 
+def _manual_request(event, transcript):
+    """Only the actual user message of this turn can select save/repair mode."""
+    with transcript.open('rb') as handle:
+        size = os.fstat(handle.fileno()).st_size
+        handle.seek(max(0, size - MAX_TAIL))
+        lines = handle.read(MAX_TAIL).splitlines()
+    in_turn, text = False, ''
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except (ValueError, UnicodeError):
+            continue
+        payload = row.get('payload', {})
+        if not isinstance(payload, dict):
+            continue
+        if row.get('type') == 'event_msg' and payload.get('type') in ('task_started', 'turn_started'):
+            in_turn = payload.get('turn_id') == event.get('turn_id')
+            text = ''
+        if in_turn and row.get('type') == 'response_item' and payload.get('role') == 'user':
+            content = payload.get('content', [])
+            text = content if isinstance(content, str) else ''.join(item.get('text', '') for item in content if isinstance(item, dict))
+        if in_turn and row.get('type') == 'event_msg' and payload.get('type') == 'user_message' and isinstance(payload.get('message'), str):
+            text = payload['message']
+    first = text.strip().splitlines()[0].strip(' *#`"').rstrip('.!').casefold() if text.strip() else ''
+    return first in ('jetzt sichern', 'bitte jetzt sichern', 'sicherung reparieren', 'jetzt sicherung reparieren') or (
+        'Dies ist ein neuer reiner Sicherungs-/Reparaturauftrag.' in text)
+
+
 def _request_announcement(event, home, helpers, transcript, usage):
     if not isinstance(event.get('turn_id'), str) or str(uuid.UUID(event['turn_id'])) != event['turn_id']:
         raise ValueError('Actual turn required for visible announcement.')
@@ -128,17 +158,15 @@ def _compact_limit(home, cwd, window):
             if not file.is_relative_to(root.resolve()) or file.stat().st_size > MAX_TAIL:
                 raise ValueError('Context configuration cannot be read safely.')
             config.update(tomllib.loads(file.read_text(encoding='utf-8-sig')))
-    profiles = config.get('profiles', {})
-    if not isinstance(profiles, dict):
-        raise ValueError('Invalid profile context configuration.')
-    active = profiles.get(config.get('profile'), {})
-    if not isinstance(active, dict):
-        raise ValueError('Invalid active profile context configuration.')
-    limit = active.get('model_auto_compact_token_limit', config.get('model_auto_compact_token_limit'))
+    # Codex >=0.134 ignores legacy profile/profiles selectors. Modern profiles
+    # are explicit CLI-selected files; this hook has no verified active-profile
+    # or CLI-override signal. Do not invent one or treat this fallback as the
+    # complete effective host configuration. PreCompact remains authoritative.
+    limit = config.get('model_auto_compact_token_limit')
     return min(window, limit) if _positive(limit) else window
 
 
-def _usage(event, home, cwd, helpers):
+def _usage(event, home, cwd, helpers, allow_missing=False):
     value = event.get('transcript_path') or ''
     # The Windows host supplies canonical \\?\C:\ paths. Normalize only that
     # drive namespace before comparing against the unchanged local roots.
@@ -188,7 +216,10 @@ def _usage(event, home, cwd, helpers):
             latest = (dict(used_tokens=used, model_context_window=window, timestamp=row.get('timestamp'))
                       if _positive(used) and _positive(window) else None)
     if latest is None:
-        raise ValueError('No valid current token_count in the bounded transcript tail.')
+        if not allow_missing and not _manual_request(event, file):
+            raise ValueError('No valid current token_count in the bounded transcript tail.')
+        return file, dict(used_tokens=0, model_context_window=0, limit_tokens=0,
+                          threshold_percent=THRESHOLD_PERCENT, measurement='unavailable')
     latest['limit_tokens'] = _compact_limit(home, cwd, latest['model_context_window'])
     latest['threshold_percent'] = THRESHOLD_PERCENT
     return file, latest
@@ -199,17 +230,25 @@ def _checkpoint(root, session, workspace=None):
     # local file reader here; no Codex process, prompt or model is started.
     code = """
 const {resumeBoundCheckpoint,chatTaskForCheckpoint}=require(process.argv[1]);
+try{
 const {checkpoint:r}=resumeBoundCheckpoint(process.argv[2],{session_id:process.argv[3],workspace:process.argv[4]});
 let continuation;try{continuation=chatTaskForCheckpoint(r,process.argv[3]);}catch{}
 console.log(JSON.stringify({project_id:r.project_id,checkpoint_id:r.checkpoint_id,
 file:r.file,sha256:r.sha256,chat_task_status:continuation?'bound':'unbound',
 next_step:continuation?continuation.next_step.text:'Keine automatische Fortsetzung: Chat-Auftrag im gesicherten Ursprung pruefen und ausdruecklich binden.'}));
+}catch(e){console.log(JSON.stringify({error_code:e.message==='Bound checkpoint workspace mismatch'?'checkpoint_workspace_mismatch':e.code==='ENOENT'?'checkpoint_missing':'checkpoint_invalid'}));process.exitCode=2;}
 """
     result = subprocess.run(['node', '-e', code, str(HERE / 'handoff-store.cjs'), str(root), session, str(workspace or '')],
                             capture_output=True, text=True, encoding='utf-8', timeout=8,
                             creationflags=0x08000000 if os.name == 'nt' else 0)
     if result.returncode or len(result.stdout) > MAX_EVENT:
-        raise ValueError('Indexed checkpoint unavailable or inconsistent; no alternate project loaded.')
+        try:
+            code = json.loads(result.stdout).get('error_code') if len(result.stdout) <= MAX_EVENT else None
+        except (ValueError, TypeError, AttributeError):
+            code = None
+        error = ValueError('Indexed checkpoint unavailable or inconsistent; no alternate project loaded.')
+        error.save_error_code = code if code in ('checkpoint_workspace_mismatch', 'checkpoint_missing') else 'checkpoint_invalid'
+        raise error
     record = json.loads(result.stdout)
     if not all(isinstance(record.get(key), str) and record[key] for key in
                ('project_id', 'checkpoint_id', 'file', 'sha256', 'next_step')):
@@ -217,7 +256,7 @@ next_step:continuation?continuation.next_step.text:'Keine automatische Fortsetzu
     return record
 
 
-def _capture(event, home, root, transcript, usage, helpers):
+def _capture(event, home, root, transcript, usage, helpers, manual_save=False):
     checkpoint = _checkpoint(root, event['session_id'], event['cwd'])
     working = root / (event['session_id'] + '-working.md')
     if helpers._digest(working) != checkpoint['sha256']:
@@ -253,23 +292,32 @@ def _capture(event, home, root, transcript, usage, helpers):
                         and helpers._digest(transcript, cached['transcript']['bytes']) == cached['transcript']['sha256']
                         and (directory / 'successor-start.txt').read_text(encoding='utf-8') == start):
                     raise ValueError('Previously saved checkpoint or resume file is no longer verified.')
-                return cached
+                if not manual_save:
+                    return cached
+        previous_reference = None
         if attempt_file.is_file():
             previous = helpers._json_file(attempt_file)
             if not isinstance(previous, dict):
                 raise ValueError('Capture attempt metadata must be an object.')
             if (previous.get('session_id') == event['session_id']
                     and previous.get('checkpoint_id') == checkpoint['checkpoint_id']):
-                raise ValueError('Capture already attempted for this checkpoint; inspect the existing local attempt.')
+                if not manual_save or previous.get('turn_id') == event.get('turn_id'):
+                    raise ValueError('Capture already attempted for this checkpoint; inspect the existing local attempt.')
+                retained = parent / ('context-previous-attempt-' + uuid.uuid4().hex + '.json')
+                helpers._atomic_json(retained, previous)
+                previous_reference = dict(file=retained.name, sha256=helpers._digest(retained))
         attempt = dict(schema_version=1, status='attempted', session_id=event['session_id'],
-                       project_id=checkpoint['project_id'], checkpoint_id=checkpoint['checkpoint_id'])
+                       project_id=checkpoint['project_id'], checkpoint_id=checkpoint['checkpoint_id'], turn_id=event.get('turn_id'))
+        if previous_reference:
+            attempt['previous_attempt'] = previous_reference
         helpers._atomic_json(attempt_file, attempt)
         directory = parent / ('context-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
         directory.mkdir(exist_ok=False)
         attempt['snapshot_path'] = str(directory)
         helpers._atomic_json(attempt_file, attempt)
         manifest = dict(schema_version=1, status='ERROR', session_id=event['session_id'],
-                        cwd=str(event['cwd']), trigger='context_usage', native_hook_event=event['hook_event_name'],
+                        cwd=str(event['cwd']), trigger='manual' if manual_save else 'context_usage', native_hook_event=event['hook_event_name'],
+                        turn_id=event.get('turn_id'),
                         context_usage=usage, checkpoint_id=checkpoint['checkpoint_id'],
                         project_id=checkpoint['project_id'], snapshot_path=str(directory),
                         model_called=False, network_requested=False, chat_created=False,
@@ -311,7 +359,15 @@ def _capture(event, home, root, transcript, usage, helpers):
             lock.unlink()
 
 
-def handle_event(event, *, codex_home=None, handoff_root=None):
+def _manual_message(desktop):
+    visible = '**Arbeitsstand gesichert.**\n\nDie manuelle Sicherung wurde geschrieben und vollständig zurückgelesen.'
+    url = desktop.get('manual_start_url')
+    if isinstance(url, str) and url.startswith('codex://threads/new?') and len(url) < 16000:
+        visible += '\n\n### [▶ Neuen Chat starten](' + url + ')\n\nAnklicken und den vorbereiteten Auftrag absenden.'
+    return visible
+
+
+def handle_event(event, *, codex_home=None, handoff_root=None, manual_save=False):
     if not isinstance(event, dict):
         return {'systemMessage': 'Kontextwaechter: ungueltige Eingabe; PreCompact-Status separat pruefen.'}
     # Never intercept a new user message with this optional context monitor.
@@ -332,28 +388,62 @@ def handle_event(event, *, codex_home=None, handoff_root=None):
         helpers = _helpers(home)
         if not helpers._local(home) or not helpers._local(cwd):
             raise ValueError('Remote paths are not context snapshot sources.')
-        transcript, usage = _usage(event, home, cwd, helpers)
+        transcript, usage = (_usage(event, home, cwd, helpers, allow_missing=True) if manual_save
+                             else _usage(event, home, cwd, helpers))
     except (OSError, ValueError, TypeError, KeyError, UnicodeError) as exc:
         if home is not None and helpers is not None:
             _observe(event, home, helpers, 'usage_unavailable',
                      error_code=USAGE_ERRORS.get(str(exc), 'source_unreadable'))
+        if manual_save:
+            return {'systemMessage': '**Sicherung nicht ausgeführt.**\n\nDer lokale Verlauf oder Arbeitsordner dieses Chats konnte nicht geprüft werden. '
+                    'Der Sicherungsauftrag bleibt offen; gezielte Lese- und Reparaturwerkzeuge sind erlaubt.'}
         return {'systemMessage': 'Kontextauslastung nicht verlaesslich lesbar; keine Prozentbehauptung. PreCompact-Status separat pruefen.'}
-    if usage['used_tokens'] * 100 < usage['limit_tokens'] * THRESHOLD_PERCENT:
+    if not manual_save:
+        # The host emits PostToolUse after the manual CLI too. Do not turn the
+        # explicitly requested save into an automatic chat switch afterwards.
+        latest = home / 'handoff-snapshots' / event['session_id'] / 'context-latest.json'
+        try:
+            saved = helpers._json_file(latest) if latest.is_file() else {}
+            if (saved.get('trigger') == 'manual' and saved.get('session_id') == event['session_id']
+                    and saved.get('turn_id') == event.get('turn_id') and helpers._verified(saved)
+                    and helpers._digest(transcript, saved['transcript']['bytes']) == saved['transcript']['sha256']):
+                transition = Path(saved['snapshot_path']) / 'desktop-transition.json'
+                desktop = helpers._json_file(transition) if transition.is_file() else {}
+                visible = _manual_message(desktop)
+                return {'continue': False, 'systemMessage': visible, 'stopReason': 'Manueller Sicherungsauftrag bereits bestaetigt.',
+                        'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext':
+                            'Manuelle Sicherung fuer diesen Turn ist bestaetigt. Gib nur diese Meldung aus; '
+                            'keinen automatischen Chatwechsel anschliessen. Ein neuer ausdruecklicher Auftrag „jetzt sichern“ bleibt erlaubt.\n' + visible}}
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        if _manual_request(event, transcript):
+            _observe(event, home, helpers, 'manual_save_requested', usage)
+            instruction = ('Dieser Turn enthaelt einen ausdruecklichen neuen Sicherungs-/Reparaturauftrag. '
+                'Keine automatische Weiterleitung ankuendigen oder ausfuehren und keine alte Stoppmeldung wiederholen. '
+                'Notwendige Lese-, Store- und Reparaturwerkzeuge sind erlaubt. Den eigenen aktuellen chat_task '
+                'und tatsaechlichen Chat-/Host-cwd ueber den vorhandenen Store sichern; git.repository bleibt separat. '
+                'Dann context-handoff-guard.py --manual-save mit minimalem eigenem Event auf stdin ausfuehren. '
+                'Keine Modell-/Benchmarklaeufe oder andere Projektfacharbeit. Erst nach vollstaendigem Ruecklesen Erfolg melden.')
+            return {'systemMessage': 'Manueller Sicherungsauftrag aktiv; automatische Weiterleitung fuer diesen Turn ausgesetzt.',
+                    'hookSpecificOutput': {'hookEventName':'PostToolUse', 'additionalContext':instruction}}
+    if not manual_save and usage['used_tokens'] * 100 < usage['limit_tokens'] * THRESHOLD_PERCENT:
         _observe(event, home, helpers, 'below_threshold', usage)
         return {}
     try:
-        if not _announcement_seen(event, transcript):
+        if not manual_save and not _announcement_seen(event, transcript):
             return _request_announcement(event, home, helpers, transcript, usage)
     except (OSError, ValueError, TypeError, KeyError):
         return {'systemMessage': 'Chatweiterleitung wartet: sichtbare Vorankündigung nicht gebunden. Kein automatischer Wechsel gestartet.'}
     snapshot_saved = False
     try:
         root = Path(handoff_root or DEFAULT_ROOT).resolve(strict=True)
-        manifest = _capture(event, home, root, transcript, usage, helpers)
+        manifest = (_capture(event, home, root, transcript, usage, helpers, manual_save=True) if manual_save
+                    else _capture(event, home, root, transcript, usage, helpers))
         snapshot_saved = True
         _observe(event, home, helpers, 'stop_saved', usage)
         launch = getattr(helpers, '_desktop_successor', None)
-        desktop = (launch(event, manifest, handoff_root=root, codex_home=home) if callable(launch)
+        desktop = ((launch(event, manifest, handoff_root=root, codex_home=home, offer_only=True) if manual_save
+                    else launch(event, manifest, handoff_root=root, codex_home=home)) if callable(launch)
                    else {'status': 'fallback_required', 'successor_thread_id': None})
         reason = (f'Kontextschwelle {THRESHOLD_PERCENT}% erreicht; lokale Sicherung bestaetigt. Keine weitere Facharbeit im Ursprung. '
                   'Dreifeld-Start: ' + str(Path(manifest['snapshot_path']) / 'successor-start.txt')
@@ -368,22 +458,44 @@ def handle_event(event, *, codex_home=None, handoff_root=None):
         else:
             reason += ' Desktop-Uebernahme nicht bestaetigt; vorhandenen Dreifeld-Start fuer manuelle Fortsetzung nutzen.'
         reason += ' Alten Chat erst nach Uebernahme archivieren.'
-    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
-        _observe(event, home, helpers, 'stop_unverified', usage)
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+        code = getattr(exc, 'save_error_code', None) or ('disk_full' if isinstance(exc, OSError) and exc.errno == 28 else
+                'write_denied' if isinstance(exc, PermissionError) else 'snapshot_write_failed')
+        desktop = dict(status='fallback_required', successor_thread_id=None, save_error_code=code)
+        _observe(event, home, helpers, 'stop_unverified', usage, save_error_code=code)
         reason = (f'Kontextschwelle {THRESHOLD_PERCENT}% erreicht; lokale Sicherung NICHT bestaetigt. Alter Durchlauf vorsorglich '
                   'gestoppt. Arbeitsstand/Index lokal pruefen, keinen Nachfolger blind duplizieren, alten Chat nicht archivieren.')
     status = desktop.get('status', 'fallback_required') if 'desktop' in locals() else 'fallback_required'
+    if manual_save:
+        reason = ('Manuelle Sicherung bestaetigt.' if snapshot_saved else
+                  'Manuelle Sicherung noch offen; gezielte Reparatur bleibt erlaubt.')
     visible = helpers._transition_message(desktop if 'desktop' in locals() else {}, snapshot_saved)
+    if manual_save and snapshot_saved:
+        visible = _manual_message(desktop)
     instruction = ('Gib JETZT als Schlussantwort ausschliesslich die folgende Uebergabemeldung aus. '
-                   'Keine weiteren Werkzeuge, keine Facharbeit und keine neue Planung im Ursprung. '
+                   'Diese Stoppanweisung gilt ausschliesslich fuer Turn ' + str(event.get('turn_id')) + '. '
+                   'Keine weitere Facharbeit in diesem Durchlauf. Ein spaeterer ausdruecklicher Nutzerauftrag wie '
+                   '„jetzt sichern“ oder „Sicherung reparieren“ erlaubt in seinem neuen Turn die notwendigen '
+                   'Lese-, Store-Speicher- und Reparaturwerkzeuge. Dann eigenen Checkpoint mit korrektem tatsächlichem '
+                   'Chat-Arbeitsordner speichern; git.repository darf separat auf den Codeordner zeigen. Anschliessend '
+                   'dieses Skript mit --manual-save und dem minimalen eigenen Hookevent als JSON auf stdin verwenden. '
+                   'Eine manuelle Sicherung startet keinen Chat automatisch und hebt keine Automatiksperre auf. '
                    'Behaupte weder erfolgreichen Chatstart noch Archivierung ohne Beleg. '
                    + visible)
-    return {'continue': False, 'stopReason': reason, 'systemMessage': visible,
+    output = {'stopReason': reason, 'systemMessage': visible,
             'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext': instruction}}
+    if not manual_save or snapshot_saved:
+        output['continue'] = False
+    else:
+        output['hookSpecificOutput']['additionalContext'] = (visible + '\nDer ausdrueckliche Sicherungsauftrag ist noch offen. '
+            'Gezielte Reparatur- und Sicherungswerkzeuge bleiben erlaubt; keine Benchmark-/Modelllaeufe. '
+            'Nicht nur die alte Stoppmeldung wiederholen und keinen Erfolg behaupten.')
+    return output
 
 
 def main():
     try:
+        manual_save = sys.argv[1:] == ['--manual-save']
         if len(sys.argv) == 3 and sys.argv[1] == '--complete-announcement':
             file = Path(sys.argv[2]).resolve(strict=True)
             if file.name != 'context-observation.json' or file.stat().st_size > MAX_EVENT:
@@ -398,15 +510,23 @@ def main():
                     or Path(event['cwd']).resolve(strict=True) != Path.cwd().resolve(strict=True)):
                 raise ValueError('Announcement caller mismatch.')
             raw = json.dumps(event).encode('utf-8')
-        elif len(sys.argv) == 1:
+        elif len(sys.argv) == 1 or manual_save:
             raw = sys.stdin.buffer.read(MAX_EVENT + 1)
         else:
             raise ValueError('Unsupported context guard arguments.')
         if len(raw) > MAX_EVENT:
             raise ValueError('Hook input exceeds limit.')
-        result = handle_event(json.loads(raw))
+        event = json.loads(raw)
+        if manual_save and (event.get('session_id') != os.environ.get('CODEX_THREAD_ID')
+                or str(uuid.UUID(event.get('turn_id', ''))) != event.get('turn_id')
+                or Path(event.get('cwd', '')).resolve(strict=True) != Path.cwd().resolve(strict=True)):
+            raise ValueError('Manual save requires actual calling session, turn and workspace.')
+        result = handle_event(event, manual_save=manual_save)
     except (OSError, ValueError, TypeError, KeyError, UnicodeError):
-        result = {'systemMessage': 'Kontextwaechter-Eingabe unlesbar; PreCompact-Status separat pruefen.'}
+        result = {'systemMessage': ('**Sicherung nicht ausgeführt.**\n\nFür den manuellen Aufruf müssen die eigene Session, '
+                  'die echte aktuelle Turn-ID und der tatsächliche Chat-Arbeitsordner zusammenpassen. '
+                  'Der Sicherungsauftrag bleibt offen.') if manual_save else
+                  'Kontextwaechter-Eingabe unlesbar; PreCompact-Status separat pruefen.'}
     print(json.dumps(result, ensure_ascii=True))
 
 

@@ -31,9 +31,10 @@ if ($Action -eq 'Work') {
 $currentService = (& $nodePath $serviceEntry --status | ConvertFrom-Json)
 if ($LASTEXITCODE -ne 0) { throw ('Cannot start maintenance with invalid prior state: ' + $currentService.error) }
 if ($currentService.owner.alive) { [pscustomobject]@{status='already_running';pid=$currentService.owner.pid} | ConvertTo-Json; exit 0 }
-foreach ($requiredFile in @('project-knowledge-sync.ts','note-navigation-sync.ts','service-resume.cjs','semantic-sync.cjs','learning-sync.cjs','sync-text-graph.py')) {
+foreach ($requiredFile in @('project-knowledge-sync.ts','note-navigation-sync.ts','native-index-watch.ps1','service-resume.cjs','semantic-sync.cjs','learning-sync.cjs','sync-text-graph.py')) {
     if (!(Test-Path -LiteralPath (Join-Path $PSScriptRoot $requiredFile))) { throw ('Required maintenance component missing: ' + $requiredFile) }
 }
+if (!(Test-Path -LiteralPath 'C:\TheHive\graphify-out\.graphify_python' -PathType Leaf)) { throw 'Required Python pointer missing: C:\TheHive\graphify-out\.graphify_python' }
 if (!(Test-Path -LiteralPath 'C:\Users\USER\.bun\bin\bun.exe' -PathType Leaf)) { throw 'Required existing Bun runtime missing: C:\Users\USER\.bun\bin\bun.exe' }
 $startStamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
 $serviceProcess = Start-Process -FilePath $nodePath -ArgumentList @(('"' + $serviceEntry + '"'),'--watch') -WorkingDirectory 'C:\TheHive' -WindowStyle Hidden -RedirectStandardOutput (Join-Path $PSScriptRoot ($startStamp + '-service.stdout.log')) -RedirectStandardError (Join-Path $PSScriptRoot ($startStamp + '-service.stderr.log')) -PassThru

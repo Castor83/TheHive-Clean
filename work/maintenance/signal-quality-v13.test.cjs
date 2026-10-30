@@ -118,3 +118,17 @@ test('Gesamt-Promptbudget begrenzt Modellarbeit und hält weitere Fälle zurück
   assert.equal(prepared.toReview.length,2);
   assert.equal(prepared.preclassified[0].decision,'hold');
 });
+
+test('explicit report output directory works and duplicate output flags are refused',()=>{
+  const args=['--review-file','existing.json','--reviewer-model','qwen:9b'];
+  const dir=path.join(os.tmpdir(),'review-target');
+  assert.equal(q.parseArgs([...args,'--output-dir',dir]).outDir,dir);
+  assert.throws(()=>q.parseArgs([...args,'--output-dir',dir,'--output-dir',dir]),/doppeltes/);
+});
+test('review schema and evidence validation agree on minimum quote length',()=>{
+  const candidate=[{topic:'quote-test',original:'abcdefghijk',situational:false}];
+  const judgment=quote=>({items:[{topic:'quote-test',verdict:'durable',quote,reason:'Direct instruction',confidence:0.95}]});
+  assert.throws(()=>q.validateJudgments(candidate,judgment('abcdefg')),/Zitat/);
+  assert.equal(q.validateJudgments(candidate,judgment('abcdefgh')).length,1);
+  assert.equal(q.outputSchema(['quote-test']).properties.items.items.properties.quote.minLength,8);
+});

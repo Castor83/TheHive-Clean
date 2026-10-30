@@ -32,9 +32,9 @@ class RepeatedHeadingSyncTests(unittest.TestCase):
                 "directed": False, "multigraph": False, "graph": {},
                 "nodes": [
                     {"id": "semantic_a", "label": "Shared semantic label", "source_file": source_name,
-                     "source_location": "L1", "file_type": "concept", "_origin": "semantic"},
+                     "source_location": "L1", "file_type": "concept", "_origin": "semantic", "community": 100, "community_name": "Historical fixture"},
                     {"id": "semantic_b", "label": "Shared semantic label", "source_file": source_name,
-                     "source_location": "L1", "file_type": "concept", "_origin": "semantic"},
+                     "source_location": "L1", "file_type": "concept", "_origin": "semantic", "community": 100, "community_name": "Historical fixture"},
                 ],
                 "links": [
                     {"source": "semantic_a", "target": "semantic_b", "relation": "supports",
@@ -77,6 +77,9 @@ class RepeatedHeadingSyncTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), source_bytes)
             semantic_nodes = [node for node in output["nodes"] if node.get("layer") == "historical_semantic"]
             self.assertEqual({node["id"] for node in semantic_nodes}, {"semantic_a", "semantic_b"})
+            current_nodes = [node for node in output["nodes"] if node.get("layer") != "historical_semantic"]
+            self.assertTrue(current_nodes)
+            self.assertTrue(all(node.get("community") != 100 for node in current_nodes))
             semantic_edges = [edge for edge in output["links"] if edge.get("layer") == "historical_semantic"]
             self.assertEqual(len(semantic_edges), 1)
             for field, value in baseline["links"][0].items():
@@ -84,7 +87,7 @@ class RepeatedHeadingSyncTests(unittest.TestCase):
             for node in semantic_nodes:
                 original = next(item for item in baseline["nodes"] if item["id"] == node["id"])
                 for field, value in original.items():
-                    self.assertEqual(node[field], value)
+                    self.assertEqual(node[field], "Semantische Basis: " + value if field == "community_name" else value)
 
 
 if __name__ == "__main__":

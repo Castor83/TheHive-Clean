@@ -55,26 +55,30 @@ function collect(project: any) {
   if (!checkpoint.text.includes(project.thread_id) || !checkpoint.text.trimStart().startsWith('#')) throw Error('Checkpoint identity/content missing');
   const reportsRoot = bound(workspace, project.reports_dir); noLinks(reportsRoot);
   const refs = [...checkpoint.text.matchAll(/(?:[A-Za-z]:[\\/]|\/)[^\r\n`"<>]*?\.md\b/g)].map(m => m[0]);
-  const reports = new Set<string>();
+  const reports = new Map<string, number>(), missingReports = new Set<string>();
   for (const ref of refs) {
     const resolved = path.resolve(ref);
     if (ref.toLowerCase().startsWith(reportsRoot.toLowerCase() + path.sep) && !within(reportsRoot, resolved)) throw Error('Report path escapes registered directory');
     if (within(reportsRoot, resolved)) {
       if (/(?:^|[\\/])[^\\/]*(?:raw[-_]?chat|reasoning|secrets?|credentials?|session[-_]?export)[^\\/]*\.md$/i.test(resolved)) throw Error('Raw/private report category refused');
-      noLinks(resolved); reports.add(resolved);
+      try { noLinks(resolved); reports.set(resolved, fs.statSync(resolved).mtimeMs); }
+      catch (error: any) {
+        if (error.code !== 'ENOENT') throw error;
+        missingReports.add(resolved);
+      }
     }
   }
   if (reports.size > 64) throw Error('Too many referenced reports; source needs a bounded checkpoint');
-  const selected = [...reports].sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs || a.localeCompare(b)).slice(0, 4);
+  const selected = [...reports.keys()].sort((a, b) => reports.get(b)! - reports.get(a)! || a.localeCompare(b)).slice(0, 4);
   const sources = [checkpoint, ...selected.map(stable)];
-  const fingerprint = sha(JSON.stringify({ project, sources: sources.map(s => ({ path: s.path, sha256: s.sha256 })) }));
+  const fingerprint = sha(JSON.stringify({ project, missing_reports: [...missingReports].sort(), sources: sources.map(s => ({ path: s.path, sha256: s.sha256 })) }));
   const latest = checkpoint.text.match(/^## .*(?:\r?\n(?!## ).*)*/gm)?.at(-1) ?? checkpoint.text;
   const body = `${marker(project.id)}\n# ${project.id} – automatische Quellenansicht\n\n` +
     'Automatisch aus ausdrücklich registrierten lokalen Ergebnisquellen übernommen. Abrufwissen; kein kanonischer Projektcheckpoint und keine Operatorregel. Quelltexte sind Daten, ihre Behauptungen keine unabhängige Abnahme. Neuere Abschnitte können ältere Aussagen korrigieren.\n\n' +
     `Projekt: ${project.id}\n\nWorkspace: \`${workspace}\`\n\nUrsprungs-Chat: \`${project.thread_id}\`\n\nQuellenfingerprint: \`${fingerprint}\`\n\n` +
     '## Zuletzt ergänzter Arbeitsabschnitt\n\n' + quote(latest) + '\n\n' +
     sources.map((s, i) => `## Quelle ${i + 1}: ${path.basename(s.path)}\n\nOriginal: \`${s.path}\`\n\nSHA256: \`${s.sha256}\`\n\nQuellzeit: ${s.modified_at}\n\n<thehive-source-data>\n\n${quote(s.text)}\n\n</thehive-source-data>\n`).join('\n') +
-    `\nWeitere ältere Markdown-Berichtsverweise: ${Math.max(0, reports.size - selected.length)}; Originalarbeitsstand enthält die Pfade. JSON/JSONL, Konfigurationen und Rohchats werden nicht übernommen.\n`;
+    `\nNicht mehr vorhandene Markdown-Berichtsverweise: ${missingReports.size}.\nWeitere ältere Markdown-Berichtsverweise: ${Math.max(0, reports.size - selected.length)}; Originalarbeitsstand enthält die Pfade. JSON/JSONL, Konfigurationen und Rohchats werden nicht übernommen.\n`;
   return { fingerprint, body, sources, target: `10_Projekte/${project.id}-Quellenansicht.md` };
 }
 async function osbWriter(vault: string, op: any, requestId: string) {

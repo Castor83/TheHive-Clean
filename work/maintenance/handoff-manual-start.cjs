@@ -36,7 +36,7 @@ function offerManualStart(input,{codexHome=process.env.CODEX_HOME||path.join(req
  '1. Ermittle die eigene echte aktuelle Turn-ID mit read_thread. Fuehre node C:\\TheHive\\work\\maintenance\\handoff-manual-start.cjs aus; JSON ueber stdin: '+JSON.stringify({operation:'accept',offer_file:file,turn_id:'<eigene aktuelle Turn-ID>',human_requested:true}),
  '2. Bei existing_successor nur den genannten Nachfolger oeffnen; eigenen neuen Auftrag erhalten, keine parallele Facharbeit. Bei origin_busy keine Facharbeit beginnen; Nutzer kann den alten Lauf stoppen und hier erneut senden. Bei Fehler keine Schutzpruefung umgehen.',
  '3. Bei manual_successor_bound den exakt genannten Handoff mit handoff-resume.ts --project '+b.cp.project_id+' --workspace '+JSON.stringify(b.cwd)+' --handoff '+JSON.stringify(b.cp.file)+' laden.',
- '4. Vor Facharbeit die in continuation.manual_context.transcript_source bezeichneten lokalen neueren Nutzernachrichten seit original_snapshot_bytes gezielt lesen. Neue Nachrichten haben Vorrang. Nichts verwerfen. Den aktualisierten eigenen Auftrag und eine knappe inhaltliche Zusammenfassung im eigenen Storecheckpoint sichern. Fuer diesen Zwischenstand nur zugelassene Patchfelder wie last_section und sources verwenden; status nicht auf completed setzen. chat_task steht neben patch und verweist auf einen vorhandenen sources-Eintrag. expected_parent frisch aus dem Store lesen. Unter sources.manual_context_review die zurueckgegebene transcript_copy als path und deren sha256 speichern; damit die gelesene Grenze binden.',
+ '4. Vor Facharbeit die in continuation.manual_context.transcript_source bezeichneten lokalen neueren Nutzernachrichten seit original_snapshot_bytes gezielt lesen. Neue Nachrichten haben Vorrang. Nichts verwerfen. Den aktualisierten eigenen Auftrag und eine knappe inhaltliche Zusammenfassung im eigenen Storecheckpoint sichern. Fuer diesen Zwischenstand nur zugelassene Patchfelder wie last_section und sources verwenden; status nicht auf completed setzen. chat_task steht neben patch und verweist auf einen vorhandenen sources-Eintrag. expected_parent frisch aus dem Store lesen. Unter sources["manual_context_review_" + eigene CODEX_THREAD_ID + "_" + zurueckgegebene sha256] die zurueckgegebene transcript_copy als path und deren sha256 speichern; damit die gelesene Grenze binden.',
  '5. Erst danach die Uebernahme mit dem vorhandenen handoff-desktop.cjs operation confirm_takeover bestaetigen; snapshot_path bleibt die urspruengliche Snapshotreferenz. Archivierung nur ueber diesen kontrollierten Abschluss.',
  '', 'Bisheriger eigener naechster Schritt: '+task.next_step.text,''].join('\n');
  fs.writeFileSync(guide,text,'utf8');
@@ -70,7 +70,7 @@ async function acceptManualStart(input){
  if(path.resolve(input.offer_file)!==path.join(b.dir,'manual-start.json'))throw Error('Offer location mismatch');
  const lock=path.join(b.root,offer.session_id+'-desktop.lock'),nonce=crypto.randomUUID();fs.writeFileSync(lock,nonce,{flag:'wx'});
  try{
-  const journal=path.join(b.root,offer.session_id+'-status.json'),j=fs.existsSync(journal)?read(journal):{};
+  const journal=path.join(b.root,offer.session_id+'-status.json');let j=fs.existsSync(journal)?read(journal):{};
   if(j.originThreadId&&j.originThreadId!==offer.session_id)throw Error('Foreign journal');
   if(j.repositoryPath&&j.repositoryPath!==b.cwd)throw Error('Foreign workspace');
   if((j.checkpointId&&j.checkpointId!==b.cp.checkpoint_id)||(j.handoffFile&&j.handoffFile!==b.cp.file)||
@@ -102,8 +102,18 @@ async function acceptManualStart(input){
   const origin=await call('read_thread',{threadId:offer.session_id,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:200});
   if(origin.thread?.id!==offer.session_id)throw Error('Origin mismatch');
   if(!['idle','notLoaded'].includes(origin.thread.status?.type||origin.thread.status))return {status:'origin_busy'};
+  const naming=await require('./handoff-naming.cjs').resolveAppNaming({root:b.root,session_id:offer.session_id,project_id:b.cp.project_id,workspace:b.cwd,title:j.originTitle||origin.thread.title||b.cp.project_id},async id=>(await call('read_thread',{threadId:id,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:200})).thread);
+  j={...j,naming,originTitle:j.originTitle||origin.thread.title||b.cp.project_id};
+  async function boundResult(){
+   const context=manualContext(read(journal),child,home);
+   let naming_title_status='pending';
+   if(tools.some(t=>t.name==='set_thread_title')){
+    try{await call('set_thread_title',{threadId:child,title:naming.successor_title});naming_title_status='applied';}catch{}
+   }
+   return {status:'manual_successor_bound',...context,naming,naming_title_status};
+  }
   if(known===child&&j.manualAuthorization){
-   try{return {status:'manual_successor_bound',...manualContext(j,child,home)};}catch{/* A new explicit user start may capture a newer boundary; retain the previous receipt. */}
+   try{manualContext(j,child,home);write(journal,j);return await boundResult();}catch{/* A new explicit user start may capture a newer boundary; retain the previous receipt. */}
   }
   // Verify original prefix, then preserve a new, separate user-authorized boundary.
   const fresh=require('./handoff-freshness.cjs').checkSnapshotFreshness({snapshotPath:b.dir,codexHome:home,sessionId:offer.session_id});
@@ -118,7 +128,7 @@ async function acceptManualStart(input){
   const authorization={origin_session_id:offer.session_id,successor_session_id:child,checkpoint_id:b.cp.checkpoint_id,snapshot_path:dir,original_snapshot_bytes:b.manifest.transcript.bytes,requested_at:new Date().toISOString(),source_ref:input.offer_file,...(projectBinding?{project_binding:projectBinding}:{})};
   write(path.join(dir,'manual-authorization.json'),authorization);
   write(journal,{...j,originThreadId:offer.session_id,origin_thread_id:offer.session_id,successorThreadId:child,successor_thread_id:child,projectId:project,app_project_id:project,project_id:b.cp.project_id,repositoryPath:b.cwd,handoffRoot:b.root,checkpointId:b.cp.checkpoint_id,handoffFile:b.cp.file,phase:'successor_visible',freshnessBaseline:j.freshnessBaseline||{snapshot_path:b.dir,checkpoint_id:b.cp.checkpoint_id},automationCancelledAt:j.automationCancelledAt||new Date().toISOString(),automationCancelReason:j.automationCancelReason||'human_manual_start',manualAuthorization:authorization,updatedAt:new Date().toISOString()});
-  return {status:'manual_successor_bound',...manualContext(read(journal),child,home)};
+  return await boundResult();
  }finally{if(fs.readFileSync(lock,'utf8')===nonce)fs.unlinkSync(lock);}
 }
 module.exports={offerManualStart,manualContext,manualProjectMatches,acceptManualStart};

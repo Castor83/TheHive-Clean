@@ -120,3 +120,15 @@ test('dead recorded intake owner is archived and recovered; live or unknown owne
   fs.writeFileSync(lock, 'unbekannter Besitzer');
   await assert.rejects(() => sync(f), /locked/i); assert.equal(fs.readFileSync(lock, 'utf8'), 'unbekannter Besitzer');
 });
+
+test('missing historical reports do not block current result intake and are counted',async()=>{
+  const sync=await api(),f=fixture();
+  const missing=path.join(f.workspace,'work/verification/old-missing.md');
+  fs.appendFileSync(f.source,`\nHistorical: \`${missing}\`\nAgain: \`${missing}\`\n`);
+  const result=await sync(f);
+  assert.equal(result.status,'updated');
+  const text=fs.readFileSync(f.target,'utf8');
+  assert.ok(text.includes('32768'));
+  assert.match(text,/Nicht mehr vorhandene Markdown-Berichtsverweise: 1/);
+  assert.equal((await sync(f)).status,'unchanged');
+});

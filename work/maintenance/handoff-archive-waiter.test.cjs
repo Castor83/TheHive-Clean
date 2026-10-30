@@ -39,3 +39,5 @@ test('busy reads have a finite wake budget',async()=>{
   await completePending({operation:'resume_archive'},{maxWaits:2,pause:async()=>{},complete:async()=>{checks++;return {archive_pending_reason:'origin_busy'};},app:{listTools:async()=>[{name:'wait_threads'}],callAppTool:async()=>waits++}});
   assert.equal(checks,3);assert.equal(waits,2);
 });
+
+test('failure status keeps the original numbered name',()=>{const {failureTitle}=require('./handoff-archive-waiter.cjs');assert.equal(failureTitle({naming:{current_title:'Original · 3'}},'Neue Nachricht'),'[Weiterleitung fehlgeschlagen] Original · 3 – Neue Nachricht – manuellen Start verwenden');});

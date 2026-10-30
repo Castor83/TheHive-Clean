@@ -5,6 +5,9 @@ work/maintenance/codex-app-pipe.cjs
 work/maintenance/codex-app-pipe.test.cjs
 work/maintenance/context-handoff-guard.py
 work/maintenance/context-handoff-guard.test.py
+work/maintenance/fixtures/README.md
+work/maintenance/fixtures/pre-compaction-snapshot.py
+work/maintenance/fixtures/precompact-reviewed-source-20261027.py
 work/maintenance/handoff-a10.test.cjs
 work/maintenance/handoff-archive-waiter.cjs
 work/maintenance/handoff-archive-waiter.test.cjs
@@ -21,6 +24,7 @@ work/maintenance/handoff-freshness.test.cjs
 work/maintenance/handoff-git.test.cjs
 work/maintenance/handoff-manual-project.test.cjs
 work/maintenance/handoff-manual-start.cjs
+work/maintenance/handoff-naming.cjs
 work/maintenance/handoff-priority.test.cjs
 work/maintenance/handoff-resume.test.cjs
 work/maintenance/handoff-resume.ts

@@ -31,9 +31,10 @@ const failedSemantic = {
 
 // Run the real supervisor against memory-only files and child-process events.
 // No service, model, production state file or external program is started.
-async function supervise(prior, mode = '--once', outcomes = {}) {
+async function supervise(prior, mode = '--once', outcomes = {}, setupFiles = () => {}) {
   const files = new Map([[key('C:/TheHive/graphify-out/.graphify_python'), 'C:/Python/python.exe']]);
   if (prior !== undefined) files.set(key(statePath), typeof prior === 'string' ? prior : JSON.stringify(prior));
+  setupFiles(files);
   const calls = [], stateWrites = [], output = [], errors = [], timeouts = [];
   const fileSystem = {
     existsSync: file => files.has(key(file)),
@@ -95,7 +96,7 @@ test('results runs first with bounded Bun and process-local OSB identity', async
   const run = await supervise();
   const names = run.calls.map(call => path.basename(call.args.find(arg => /\.(?:ps1|cjs|py|ts)$/.test(arg))));
   assert.deepEqual(names, ['project-knowledge-sync.ts', 'note-navigation-sync.ts', 'native-index-watch.ps1', 'learning-sync.cjs', 'sync-text-graph.py', 'semantic-sync.cjs']);
-  assert.equal(key(run.calls[0].executable), 'c:/users/USER/.bun/bin/bun.exe');
+  assert.equal(key(run.calls[0].executable), key('C:/Users/USER/.bun/bin/bun.exe'));
   assert.deepEqual(Array.from(run.calls[0].args), [path.join('C:/TheHive', 'work/maintenance', 'project-knowledge-sync.ts')]);
   assert.equal(run.timeouts[0], 60000);
   assert.equal(run.calls[0].options.env.VAULT_AGENT_NAME, 'codex-desktop-agent');
@@ -216,4 +217,49 @@ test('drain bounds a continuously changing backlog and preserves pending status'
   assert.equal(run.calls.filter(c=>c.args.some(a=>a.endsWith('semantic-sync.cjs'))).length,32);
   assert.equal(run.stateWrites.at(-1).status,'catching_up');
   assert.equal(run.process.exitCode,1);
+});
+
+test('large stage JSON retains failure and partial navigation state',async()=>{
+  for(const result of [{state:'failed',error:'source changed',details:'x'.repeat(40000)},{status:'partial',blocked:[{path:'x'.repeat(40000)}]}]){
+    const run=await supervise(undefined,'--once',{'note-navigation-sync.ts':{stdout:JSON.stringify(result),exit_code:0}});
+    const state=JSON.parse(run.output.at(-1));
+    assert.equal(state.status,'degraded');
+    assert.equal(state.stages.navigation.result.state??state.stages.navigation.result.status,result.state??result.status);
+    assert.ok(state.stages.navigation.stdout.length<=32768);
+  }
+});
+test('oversized stage results fail visibly instead of implying success',async()=>{
+  const run=await supervise(undefined,'--once',{'note-navigation-sync.ts':{stdout:JSON.stringify({status:'partial',details:'x'.repeat(1048577)}),exit_code:0}});
+  const state=JSON.parse(run.output.at(-1));
+  assert.equal(state.status,'degraded');
+  assert.notEqual(state.stages.navigation.exit_code,0);
+  assert.match(state.stages.navigation.error,/exceed|too large/i);
+});
+
+test('missing Python pointer cannot leave a service ownership lock behind',async()=>{
+  let files;
+  await assert.rejects(()=>supervise(undefined,'--once',{},initial=>{files=initial;files.delete(key('C:/TheHive/graphify-out/.graphify_python'));}),/missing fixture/);
+  assert.equal(files.has(key(directory+'/service.lock.json')),false);
+});
+
+test('launcher refuses missing native component and Python pointer before spawning',()=>{
+  const {spawnSync}=require('node:child_process'),os=require('node:os');
+  for(const missing of ['native-index-watch.ps1','pointer']){
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'thehive-launch-preflight-'));
+    try{
+      const pointer=path.join(dir,'missing-python-pointer');
+      if(missing!=='pointer')fs.writeFileSync(pointer,'python');
+      for(const name of ['project-knowledge-sync.ts','note-navigation-sync.ts','native-index-watch.ps1','service-resume.cjs','semantic-sync.cjs','learning-sync.cjs','sync-text-graph.py'])
+        if(name!==missing)fs.writeFileSync(path.join(dir,name),'');
+      fs.writeFileSync(path.join(dir,'thehive-service.cjs'),'console.log(JSON.stringify({owner:null}));');
+      let script=fs.readFileSync(path.join(__dirname,'thehive-service.ps1'),'utf8');
+      script=script.replaceAll('C:\\TheHive\\graphify-out\\.graphify_python',pointer);
+      script=script.replace("$ErrorActionPreference = 'Stop'","$ErrorActionPreference = 'Stop'\nfunction Start-Process { throw 'UNEXPECTED START' }");
+      const file=path.join(dir,'start.ps1');fs.writeFileSync(file,script);
+      const result=spawnSync('powershell.exe',['-NoProfile','-File',file,'-Action','Start'],{encoding:'utf8',windowsHide:true});
+      assert.notEqual(result.status,0);
+      assert.match(result.stderr,missing==='pointer'?/Required Python pointer missing/:/Required maintenance component missing: native-index-watch/);
+      assert.doesNotMatch(result.stderr,/UNEXPECTED START/);
+    }finally{assert.ok(path.resolve(dir).startsWith(path.resolve(os.tmpdir())+path.sep));fs.rmSync(dir,{recursive:true,force:true});}
+  }
 });

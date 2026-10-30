@@ -33,7 +33,7 @@ const AGENT = 'thehive-ollama-signal-review';
 function digest(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
 function fail(message) { throw new Error(message); }
 function parseArgs(args) {
-  const opts = { vault: ROOT, outDir: DEFAULT_OUTPUT };
+  const opts = { vault: ROOT };
   const names = { '--review-file': 'reviewFile', '--reviewer-model': 'model', '--output-dir': 'outDir' };
   for (let i = 0; i < args.length; i++) {
     const name = names[args[i]];
@@ -44,6 +44,7 @@ function parseArgs(args) {
   }
   if (!opts.reviewFile || !opts.model) fail('Aufruf: node signal-quality-v13.cjs --review-file <bestehender-report.json> --reviewer-model <lokales-ollama-modell> [--output-dir <ordner>]');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99}$/.test(opts.model) || opts.model.includes('..')) fail('Ungültige Modellkennung');
+  opts.outDir ??= DEFAULT_OUTPUT;
   return opts;
 }
 function readReview(file) {
@@ -122,7 +123,7 @@ function outputSchema(topics) {
       properties: {
         topic: { type: 'string', enum: topics },
         verdict: { type: 'string', enum: ['durable', 'situational', 'contradicted', 'unsupported', 'uncertain'] },
-        quote: { type: 'string', minLength: 1, maxLength: 400 },
+        quote: { type: 'string', minLength: 8, maxLength: 400 },
         reason: { type: 'string', minLength: 1, maxLength: 500 },
         confidence: { type: 'number', minimum: 0, maximum: 1 }
       }
@@ -137,7 +138,7 @@ Judge the ORIGINAL German text versus EACH proposed principle, not its topic or 
 'contradicted' if the rule reverses or changes the original meaning, including negation.
 'unsupported' if no evidence for the alleged rule; 'uncertain' if insufficient context.
 Use the original wording carefully, including double negation. Do not invent facts or quotations.
-For every item, provide a short EXACT contiguous quote copied verbatim from its source text, plus a concise reason in German.
+For every item, provide an EXACT contiguous quote of at least 8 characters copied verbatim from its source text, plus a concise reason in German.
 Only return a JSON object matching the provided schema. Do NOT automatically approve or commit memories.`;
 async function localJudge(model, candidates, httpClient = http) {
   const payload = candidates.map(c => ({ topic: c.topic, principle: c.principle,

@@ -3,7 +3,7 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const net=require('node:net');
 const crypto=require('node:crypto');
-const {listTools,callAppTool}=require('./codex-app-pipe.cjs');
+const {listTools,callAppTool,decodeToolResult}=require('./codex-app-pipe.cjs');
 const fixtureTool={name:'list_projects',namespace:'codex_app',inputSchema:{type:'object'}};
 function frame(value){const b=Buffer.from(JSON.stringify(value));const h=Buffer.alloc(4);h.writeUInt32LE(b.length);return Buffer.concat([h,b]);}
 async function fixture(t,handler){
@@ -51,4 +51,15 @@ test('a timeout after send has an explicitly unknown outcome and no retry',async
 test('rejects oversized or invalid responses without interpreting success',async t=>{
   const pipePath=await fixture(t,(_req,socket)=>{const header=Buffer.alloc(4);header.writeUInt32LE(8*1024*1024+1);socket.end(header);});
   await assert.rejects(()=>listTools({pipePath}),error=>error.code==='APP_INVALID_RESPONSE');
+});
+
+test('malformed catalog entries preserve the sent-request error contract',async t=>{
+  for(const entry of [null, 42, {}]){
+    const pipePath=await fixture(t,(req,socket)=>socket.end(frame({jsonrpc:'2.0',id:req.id,result:{tools:[entry]}})));
+    await assert.rejects(()=>listTools({pipePath}),e=>e.code==='APP_INVALID_CATALOG'&&e.requestMayHaveBeenSent===true);
+  }
+});
+test('null tool-result blocks cannot lose the sent-request marker',()=>{
+  assert.throws(()=>decodeToolResult({contentItems:[null]}),e=>e.code==='APP_UNSUPPORTED_RESULT_SHAPE'&&e.requestMayHaveBeenSent===true);
+  assert.deepEqual(decodeToolResult({contentItems:[null,{type:'inputText',text:'{"ok":true}'}]}),{ok:true});
 });

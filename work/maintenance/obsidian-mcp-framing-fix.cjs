@@ -25,6 +25,7 @@ function prepare(root='C:/TheHive'){
   const report={prepared_at:new Date().toISOString(),target:file,plugin_version:manifest.version,original_sha256:originalHash,
     candidate:output,candidate_sha256:candidateHash,change:{before,after},installed_file_changed:false,applied:false,reloaded:false,
     activation:'Back up installed bytes and verify hash before replacement; reload existing plugin only. Preserve token, ACL, host, port and vault.'};
+  fs.mkdirSync(path.join(root,'work/verification'),{recursive:true});
   fs.writeFileSync(path.join(root,'work/verification/obsidian-mcp-framing-repair-plan-20261026.json'),JSON.stringify(report,null,2)+'\n');
   return report;
 }

@@ -8,7 +8,7 @@ import tempfile
 import unittest
 import uuid
 
-SCRIPT = Path.home() / '.codex/hooks/pre-compaction-snapshot.py'
+SCRIPT = Path(__file__).resolve().parent / "fixtures/pre-compaction-snapshot.py"
 
 
 class PreCompactHostPathTests(unittest.TestCase):

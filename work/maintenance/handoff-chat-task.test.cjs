@@ -34,7 +34,7 @@ test('connected two-chat flow preserves each assignment through starters, takeov
  const a=save(f,f.a,null,'Analyse costs'),b=save(f,f.b,a.checkpoint_id,'Fix hooks');
  const policy={enabled:true,scope:'all_local_projects',handoff_root:f.root,navigate:true,wait_for_origin_idle:true,cancel_on_new_user_message:true,archive_after_takeover:true};
  const source=path.join(__dirname,'handoff-desktop.cjs'),policyFile=path.join(__dirname,'handoff-automation-policy.json'),m={exports:{}};
- const mockFs={...fs,readFileSync(p,opts){if(path.resolve(p)===policyFile)return opts==='utf8'?JSON.stringify(policy):Buffer.from(JSON.stringify(policy));return fs.readFileSync(p,opts);}};
+ const mockFs={...fs,statSync(p,...args){if(path.resolve(p)===policyFile)return {size:Buffer.byteLength(JSON.stringify(policy))};return fs.statSync(p,...args);},readFileSync(p,opts){if(path.resolve(p)===policyFile)return opts==='utf8'?JSON.stringify(policy):Buffer.from(JSON.stringify(policy));return fs.readFileSync(p,opts);}};
  const req=name=>name==='node:fs'?mockFs:require(name);req.main={};
  new Function('require','module','__dirname','process',fs.readFileSync(source,'utf8'))(req,m,__dirname,process);
  const app={listTools:async()=>['list_projects','list_threads','read_thread','create_thread','navigate_to_codex_page','set_thread_archived'].map(name=>({name,namespace:'fixture'})),decodeToolResult:x=>x,callAppTool:async({tool,args})=>{

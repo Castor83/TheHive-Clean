@@ -431,12 +431,15 @@ def run(root, html):
     # Keep parallel literal evidence and semantic relations in JSON through the
     # export API's original_links path; simple in-memory analysis is advisory.
     communities, labels = {}, {}
+    historical_cids = {int(node.get("community") or 0) for node in extraction["nodes"]
+                       if node.get("layer") == "historical_semantic"}
+    current_cid = max(historical_cids, default=-1) + 1
     for node in extraction["nodes"]:
         if node.get("layer") == "historical_semantic":
             cid = int(node.get("community") or 0)
             label = "Semantische Basis: " + str(node.get("community_name") or cid)
         else:
-            cid, label = 100, "Aktuelle Markdown-Syntax und explizite Begriffe"
+            cid, label = current_cid, "Aktuelle Markdown-Syntax und explizite Begriffe"
         communities.setdefault(cid, []).append(node["id"])
         labels[cid] = label
     graph.graph["thehive_refresh"] = {"version": VERSION, "fingerprint": fingerprint, "generated_at": now(),
