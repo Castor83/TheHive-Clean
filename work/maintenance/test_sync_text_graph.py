@@ -12,6 +12,11 @@ SCRIPT = Path(__file__).with_name("sync-text-graph.py")
 
 class RepeatedHeadingSyncTests(unittest.TestCase):
     def test_repeated_headings_keep_distinct_ids_and_evidence(self):
+        """Verify isolated graph refresh preserves heading occurrences and semantic evidence.
+
+        Check distinct IDs and line evidence while retaining source/archive bytes and
+        separating current nodes from the historical semantic community.
+        """
         spec = importlib.util.spec_from_file_location("sync_text_graph", SCRIPT)
         sync = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(sync)

@@ -10,6 +10,7 @@ import uuid
 
 
 def module(name, file):
+    """Import and return the named sibling helper without calling its CLI entry point."""
     spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(file))
     result = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(result)
@@ -19,6 +20,12 @@ def module(name, file):
 def processes():
     # Same native CIM source as native-index-watch.ps1. Command lines are used
     # only for classification inside PowerShell and never returned or saved.
+    """Return a bounded Windows CIM process snapshot for recovery checks.
+
+    Classify potential Dream/archive workers and unknown Bun runtimes inside
+    PowerShell; return only PID, parent PID and classification flags. Unsupported
+    platforms or incomplete subprocess results raise ValueError.
+    """
     if os.name != 'nt':
         raise ValueError('Complete descendant inspection is currently Windows-only')
     script = r"""
@@ -42,6 +49,11 @@ $ErrorActionPreference='Stop'
 
 
 def quiescent(owner, rows):
+    """Return whether validated process rows rule out a live/uncertain lock owner.
+
+    Reject duplicate/malformed rows, a present owner, direct children and any
+    potential archive/Dream worker or unclassified Bun process, even if orphaned.
+    """
     ids = set()
     for row in rows:
         if (not isinstance(row, dict) or type(row.get('pid')) is not int
@@ -60,6 +72,10 @@ def quiescent(owner, rows):
 
 
 def write_new(file, data):
+    """Exclusively create file from bytes and flush its content to disk.
+
+    Existing files and write/fsync failures propagate to the caller.
+    """
     with file.open('xb') as stream:
         stream.write(data)
         stream.flush()
@@ -67,6 +83,13 @@ def write_new(file, data):
 
 
 def recover(root):
+    """Recover a learning run lock only with dead-owner and quiet-tree evidence.
+
+    Serialize recovery, reject linked state and recheck unchanged ownership.
+    Archive the lock and existing status, write receipts and a force barrier before
+    freeing the lock path. Return a status record; inspection/write failures may
+    raise. This procedure never starts Dream or modifies Brain content.
+    """
     gate = root / 'run.lock'
     mutex = root / '.run-lock-recovery'
     marker = root / 'lock-recovery.json'

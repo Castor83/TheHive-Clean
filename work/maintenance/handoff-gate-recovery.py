@@ -14,6 +14,11 @@ import uuid
 
 
 def dead(pid):
+    """Return True only when a valid PID can be proven to have exited.
+
+    Use a zero-time process wait on Windows or a signal-zero probe elsewhere.
+    Invalid PIDs, permission failures and uncertain process state return False.
+    """
     if type(pid) is not int or not 0 < pid <= 0xFFFFFFFF:
         return False
     if os.name == 'nt':
@@ -42,6 +47,12 @@ def dead(pid):
 
 
 def recover(root):
+    """Archive an unchanged local gate only after proving its owner is dead.
+
+    Hold the existing kernel recovery mutex, reject symlinks and retain malformed,
+    foreign-host or uncertain ownership. Return busy, absent, retained or recovered;
+    recovery renames the gate to a unique stale-evidence file without starting work.
+    """
     gate = root / '.lock-gate'
     mutex = root / '.lock-gate-recovery'
     if mutex.is_symlink() or gate.is_symlink():

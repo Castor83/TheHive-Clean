@@ -32,22 +32,31 @@ LOCATION = re.compile(r"^L(\d+)(?:-L?(\d+))?$")
 
 
 def now():
+    """Return the current UTC timestamp in ISO 8601 format."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def digest(data):
+    """Return the hexadecimal SHA-256 digest of the supplied bytes."""
     return hashlib.sha256(data).hexdigest()
 
 
 def encode(value):
+    """Serialize value as sorted, indented UTF-8 JSON bytes with a final newline."""
     return (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def read_json(path):
+    """Parse a UTF-8 JSON file, accepting an optional byte-order mark."""
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def atomic_bytes(path, data):
+    """Write data through a flushed temporary file and atomically replace path.
+
+    Create parent directories as needed and remove any remaining temporary file
+    even if writing or replacement fails.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix="." + path.name + ".", dir=path.parent)
     try:
@@ -63,6 +72,11 @@ def atomic_bytes(path, data):
 
 @contextmanager
 def lock(path):
+    """Yield whether a nonblocking kernel lock on path was acquired.
+
+    Create the backing file if needed and keep it after release. Hold the lock for
+    the context lifetime using Windows byte locking or POSIX flock.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as stream:
         if path.stat().st_size == 0:
@@ -90,6 +104,10 @@ def lock(path):
 
 
 def local_name(value, root):
+    """Return a root-relative slash path, or None for absolute/traversing names.
+
+    Strip a matching root prefix case-insensitively before checking the result.
+    """
     value = str(value).replace("\\", "/")
     prefix = root.as_posix().rstrip("/") + "/"
     if value.casefold().startswith(prefix.casefold()):
@@ -101,6 +119,12 @@ def local_name(value, root):
 
 def scan(root):
     # Existing Graphify ignore parser, without Git subprocesses or global ignores.
+    """Read the permitted Markdown corpus and return source metadata and empty skips.
+
+    Honor the existing Graphify ignore parser, reject symlinks and root escapes,
+    and enforce source-count/size bounds. Each source includes its byte hash and
+    lines; an empty permitted corpus raises rather than replacing the graph.
+    """
     from graphify.detect import ignored_predicate
     ignored = ignored_predicate(root, gitignore=False)
     sources, skipped = {}, []
@@ -146,6 +170,12 @@ def scan(root):
 
 
 def baseline_archive(root, out, state, sources):
+    """Validate or create an immutable archive of the existing semantic graph.
+
+    Return its directory and metadata. Verify recorded artifact hashes on reuse;
+    on first creation copy existing output artifacts and any matching source proof
+    through a staging directory, leaving the original baseline content intact.
+    """
     existing = state.get("baseline_archive")
     if not existing and (out / "graph.json").exists():
         existing = read_json(out / "graph.json").get("graph", {}).get("thehive_refresh", {}).get("baseline_archive")
@@ -208,6 +238,12 @@ def baseline_archive(root, out, state, sources):
 
 
 def historical_layer(root, archive, metadata, sources):
+    """Return copied baseline nodes, edges and hyperedges with source-binding status.
+
+    Compare archived source hashes and line ranges with the scanned corpus. Mark
+    unbound evidence as historical/unverified and retain its original provenance;
+    this step does not refresh or independently verify semantic claims.
+    """
     baseline = read_json(archive / "graph.json")
     nodes, edges = copy.deepcopy(baseline["nodes"]), copy.deepcopy(baseline["links"])
     statuses = {}
@@ -246,13 +282,24 @@ def historical_layer(root, archive, metadata, sources):
 
 
 def markdown_layer(root, sources):
+    """Build literal Markdown nodes and evidence edges from scanned sources.
+
+    Exclude YAML front matter and fenced blocks from structural parsing. Preserve
+    heading occurrences, resolve local references and record named-term mentions.
+    Add parsed body/context fields to sources and return the node/edge lists.
+    """
     nodes, edges, edge_index, docs, headings = [], [], {}, {}, {}
     def node(nid, label, name, line, kind, **extra):
+        """Append a source-located node to the current layer and return its ID."""
         nodes.append({"id": nid, "label": label, "source_file": name, "source_location": f"L{line}",
                       "file_type": "document" if kind == "document" else "concept", "_origin": LAYER,
                       "layer": LAYER, "kind": kind, "evidence_status": "current_literal_syntax", **extra})
         return nid
     def edge(start, end, relation, name, line, text):
+        """Append a relation or merge distinct evidence into its existing edge.
+
+        Ignore self-edges and deduplicate by endpoints and relation in the local index.
+        """
         if start == end:
             return
         key = (start, end, relation)
@@ -267,6 +314,7 @@ def markdown_layer(root, sources):
         edges.append(item)
         edge_index[key] = item
     def uid(*parts):
+        """Return a stable Markdown ID from null-separated identity parts."""
         return "markdown_" + digest("\0".join(map(str, parts)).encode("utf-8"))[:24]
     # Structural syntax excludes YAML front matter and fenced blocks.
     for name, source in sources.items():
@@ -360,6 +408,12 @@ def markdown_layer(root, sources):
 
 def publish(out, staged, maintenance, state):
     # Single-file atomic replacement; completion state last, rollback on exceptions.
+    """Replace staged graph outputs and write completion state with rollback evidence.
+
+    Back up prior outputs and write a publication journal before replacements.
+    On failure restore already replaced files where possible, then re-raise;
+    retain rollback material if recovery itself cannot finish.
+    """
     journal = maintenance / "text-graph-publication.json"
     rollback = Path(tempfile.mkdtemp(prefix=".graph-rollback-", dir=maintenance))
     replaced, remove_rollback = [], False
@@ -392,6 +446,13 @@ def publish(out, staged, maintenance, state):
 
 
 def run(root, html):
+    """Refresh the bounded local graph projection and return its state record.
+
+    Reuse an unchanged verified generation, otherwise preserve the semantic
+    archive, build a literal layer, validate identities/endpoints and stage exports.
+    Recheck source hashes before publishing graph/report and optional HTML outputs.
+    This function neither acquires the outer run lock nor invokes a model.
+    """
     from graphify.build import build_from_json
     from graphify.cluster import score_all
     from graphify.analyze import god_nodes
@@ -495,6 +556,11 @@ def run(root, html):
 
 
 def main():
+    """Parse CLI options, take the run lock and print a compact JSON result.
+
+    Write last-run status and successful run history locally. Return zero for
+    success/busy or one after recording a refresh failure.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--html", action="store_true", help="Also refresh existing Graphify HTML (no network fetch during generation)")

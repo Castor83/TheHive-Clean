@@ -15,6 +15,7 @@ HERE = Path(__file__).parent
 
 class RecoveryTests(unittest.TestCase):
     def setUp(self):
+        """Create a temporary learning lock/status owned by an already exited child PID."""
         spec = importlib.util.spec_from_file_location('learning_recovery', HERE / 'learning-lock-recovery.py')
         self.api = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.api)
@@ -31,6 +32,7 @@ class RecoveryTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == 'nt', 'Native CIM reader is Windows-only')
     def test_native_process_inventory_is_complete_and_contains_no_command_lines(self):
+        """Verify native process rows include this process and expose only classification fields."""
         rows = self.api.processes()
         self.assertTrue(any(row['pid'] == os.getpid() for row in rows))
         for row in rows:
@@ -38,6 +40,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertIsInstance(self.api.quiescent(self.pid, rows), bool)
 
     def test_dead_owner_with_complete_quiet_snapshot_archives_evidence(self):
+        """Verify quiet dead-owner recovery archives lock/status and writes its force marker."""
         with mock.patch.object(self.api, 'processes', return_value=[]):
             result = self.api.recover(self.root)
         self.assertEqual(result['status'], 'recovered')
@@ -46,6 +49,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue((self.root / 'lock-recovery.json').is_file())
 
     def test_descendant_disconnected_worker_or_unknown_runtime_keeps_lock(self):
+        """Verify descendants, possible orphan workers and malformed rows preserve the lock."""
         rows = [
             [{'pid': 100, 'ppid': self.pid, 'potential': False, 'unknown': False}],
             [{'pid': 100, 'ppid': 999, 'potential': True, 'unknown': False}],
@@ -60,6 +64,7 @@ class RecoveryTests(unittest.TestCase):
                 self.assertFalse((self.root / 'lock-recovery.json').exists())
 
     def test_live_foreign_or_malformed_owner_does_not_start_inspection(self):
+        """Verify unsafe owner metadata retains the lock without probing the process tree."""
         for owner in ({**self.owner, 'pid': os.getpid()}, {**self.owner, 'host': 'foreign'}, None):
             self.lock.write_text(json.dumps(owner) if owner else 'incomplete JSON', encoding='utf-8')
             before = self.lock.read_bytes()
@@ -69,6 +74,7 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(self.lock.read_bytes(), before)
 
     def test_probe_failure_preserves_lock_status_and_existing_reports(self):
+        """Verify process-inspection failure leaves the original lock and status unchanged."""
         before = self.lock.read_bytes(), self.status.read_bytes()
         with mock.patch.object(self.api, 'processes', side_effect=ValueError('unavailable')):
             with self.assertRaises(ValueError):
@@ -76,6 +82,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual((self.lock.read_bytes(), self.status.read_bytes()), before)
 
     def test_two_recoveries_never_archive_a_new_live_owner(self):
+        """Verify recovery cannot archive a newly acquired lock owned by a live process."""
         with mock.patch.object(self.api, 'processes', return_value=[]):
             first = self.api.recover(self.root)
         self.assertEqual(first['status'], 'recovered')

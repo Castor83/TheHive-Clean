@@ -23,12 +23,20 @@ _NODE_RUNTIME = Path(r'C:\Program Files\nodejs\node.exe')
 
 
 def _json_file(path):
+    """Read bounded UTF-8 JSON metadata from path, accepting an optional BOM.
+
+    Raise ValueError if the file exceeds the working-metadata size limit.
+    """
     if path.stat().st_size > MAX_WORKING_BYTES:
         raise ValueError('Metadata exceeds limit.')
     return json.loads(path.read_text(encoding='utf-8-sig'))
 
 
 def _digest(path, size=None):
+    """Return the SHA-256 hash of the whole file or exactly size prefix bytes.
+
+    Read in bounded chunks and raise OSError if the source ends before that size.
+    """
     result = hashlib.sha256()
     with path.open('rb') as handle:
         remaining = path.stat().st_size if size is None else size
@@ -129,6 +137,11 @@ def _checkpoint(cwd, session):
 
 
 def _verified(manifest):
+    """Return whether a PASS manifest matches its copied snapshot files.
+
+    Check required transcript/working entries plus any optional report/status by
+    name, byte count and digest. Missing or malformed files may raise to the caller.
+    """
     if manifest.get('status') != 'PASS':
         return False
     directory = _path(manifest['snapshot_path'])
@@ -145,6 +158,10 @@ def _verified(manifest):
 
 
 def _atomic_json(path, value):
+    """Write JSON through an exclusive, fsynced temporary file and replace path.
+
+    Reject non-finite JSON values; serialization or filesystem failures propagate.
+    """
     temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
     with temporary.open('x', encoding='utf-8', newline='\n') as handle:
         json.dump(value, handle, ensure_ascii=False, indent=2, allow_nan=False)
@@ -251,6 +268,12 @@ def _path(value):
 
 
 def _copy_prefix(source, destination, allowed_roots, limit):
+    """Copy the source bytes present at open time into a new destination file.
+
+    Require a regular absolute local source under allowed_roots and within limit.
+    Flush the copy and return its byte/hash metadata. Later appends are excluded;
+    source shrinkage or invalid paths raise instead of claiming a complete backup.
+    """
     source = _path(source)
     if not source.is_absolute() or not _local(source):
         raise ValueError('Source must be an absolute local path.')
@@ -406,6 +429,7 @@ def capture_snapshot(event, *, codex_home=None):
 
 
 def _transition_notice(desktop):
+    """Return the safe user notice for a recognized desktop block reason, or empty text."""
     notice = {
         'new_user_message_after_snapshot': 'Neuere Benutzernachricht nach der Sicherung erkannt; automatische Erstellung, Oeffnung und Archivierung gesperrt. Nachricht und lokalen Arbeitsstand fuer manuelle Fortsetzung erhalten.',
         'snapshot_unverifiable': 'Nachrichtenstand seit Sicherung nicht verlaesslich pruefbar; automatische Erstellung, Oeffnung und Archivierung gesperrt. Lokalen manuellen Rueckweg nutzen.',
@@ -457,6 +481,11 @@ def _transition_message(desktop, saved=True):
 
 
 def handle_event(event, *, codex_home=None):
+    """Capture an eligible PreCompact event and return the synchronous stop response.
+
+    Skip non-main-chat events. Only PASS snapshots reach the existing desktop
+    adapter; failures still stop compaction and retain the manual recovery path.
+    """
     result = capture_snapshot(event, codex_home=codex_home)
     if result['status'] == 'SKIPPED':
         return {}
@@ -481,6 +510,11 @@ def handle_event(event, *, codex_home=None):
 
 
 def main():
+    """Read one bounded JSON hook event from stdin and print its JSON response.
+
+    Malformed or oversized input returns continue:false with an unverified-save
+    notice; this entry point does not itself confirm successor takeover.
+    """
     try:
         raw = sys.stdin.buffer.read(MAX_EVENT_BYTES + 1)
         if len(raw) > MAX_EVENT_BYTES:

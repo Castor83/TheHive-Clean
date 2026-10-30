@@ -14,6 +14,7 @@ CANDIDATE = HERE / 'fixtures/precompact-reviewed-source-20261027.py'
 
 
 def load(path, name):
+    """Import and return a test helper from path under the supplied module name."""
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -22,6 +23,7 @@ def load(path, name):
 
 class SnapshotDesktopBindingTests(unittest.TestCase):
     def setUp(self):
+        """Create temporary snapshot sources, session identities and a PreCompact event."""
         self.snapshot = load(CANDIDATE, 'snapshot_binding_candidate')
         self.tmp = tempfile.TemporaryDirectory(prefix='thehive-handler-binding-')
         self.addCleanup(self.tmp.cleanup)
@@ -38,15 +40,18 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
                           turn_id=self.tid, cwd=str(self.cwd), transcript_path=str(self.transcript))
 
     def capture(self):
+        """Assert the fixture snapshot passes and return its manifest."""
         result = self.snapshot.capture_snapshot(self.event, codex_home=self.home)
         self.assertEqual(result['status'], 'PASS')
         return result
 
     def process_result(self):
+        """Return a successful synthetic desktop-adapter process result for this successor."""
         return subprocess.CompletedProcess([], 0, json.dumps(dict(
             status='successor_created', successor_thread_id=self.successor)), '')
 
     def test_verified_snapshot_invokes_bounded_adapter_with_only_binding_fields(self):
+        """Verify a PASS snapshot sends only binding fields and records the mocked successor."""
         manifest = self.capture()
         with mock.patch.object(self.snapshot, '_desktop_process', return_value=self.process_result()) as run:
             result = self.snapshot._desktop_successor(self.event, manifest, codex_home=self.home)
@@ -63,6 +68,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
         self.assertTrue(self.snapshot._verified(manifest))
 
     def test_partial_or_tampered_snapshot_never_contacts_desktop(self):
+        """Verify incomplete or modified snapshots never invoke the desktop subprocess."""
         manifest = self.capture()
         with mock.patch.object(self.snapshot, '_desktop_process') as run:
             for status in ('PARTIAL', 'ERROR'):
@@ -73,6 +79,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_timeout_retains_verified_snapshot_and_manual_resume(self):
+        """Verify adapter timeout leaves the verified snapshot and local resume file usable."""
         manifest = self.capture()
         with mock.patch.object(self.snapshot, '_desktop_process', side_effect=subprocess.TimeoutExpired('node', 7)):
             result = self.snapshot._desktop_successor(self.event, manifest, codex_home=self.home)
@@ -81,6 +88,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
         self.assertTrue((Path(manifest['snapshot_path']) / 'resume.md').is_file())
 
     def test_adapter_failure_writes_snapshot_bound_fallback_receipt(self):
+        """Verify adapter failure records fallback without copying private stderr details."""
         manifest = self.capture()
         failed = subprocess.CompletedProcess([], 1, '', 'PRIVATE_FAILURE_DETAIL')
         with mock.patch.object(self.snapshot, '_desktop_process', return_value=failed):
@@ -92,6 +100,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
         self.assertTrue(self.snapshot._verified(manifest))
 
     def test_invalid_successor_identity_does_not_claim_creation(self):
+        """Verify a noncanonical successor identity cannot produce a creation claim."""
         manifest = self.capture()
         bad = subprocess.CompletedProcess([], 0, '{"status":"successor_created","successor_thread_id":"wrong"}', '')
         with mock.patch.object(self.snapshot, '_desktop_process', return_value=bad):
@@ -99,6 +108,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
         self.assertEqual(result['status'], 'fallback_required')
 
     def test_new_message_reason_is_preserved_and_explained_without_message_content(self):
+        """Verify a new-message block is explained without copying private adapter fields."""
         self.capture()
         completed = subprocess.CompletedProcess([], 0, json.dumps({
             'status': 'fallback_required', 'successor_thread_id': None,
@@ -111,6 +121,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
         self.assertEqual(receipt['reason_code'], 'new_user_message_after_snapshot')
 
     def test_unknown_reason_is_not_copied_into_transition_receipt(self):
+        """Verify an unknown adapter reason is excluded from the accepted result."""
         manifest = self.capture()
         completed = subprocess.CompletedProcess([], 0, json.dumps({
             'status': 'fallback_required', 'reason_code': 'PRIVATE_UNKNOWN_DETAIL'}), '')
@@ -119,6 +130,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
         self.assertNotIn('reason_code', result)
 
     def test_non_object_desktop_output_keeps_the_verified_manual_fallback(self):
+        """Verify scalar/list adapter JSON keeps the snapshot valid and selects fallback."""
         manifest = self.capture()
         for raw in ('[]', 'null', 'true', '42'):
             with self.subTest(raw=raw):
@@ -129,6 +141,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
                 self.assertTrue(self.snapshot._verified(manifest))
 
     def test_non_string_successor_and_turn_keep_snapshot_and_stop(self):
+        """Verify malformed successor/turn values cannot authorize desktop creation."""
         manifest = self.capture()
         for value in (42, [], {}, True):
             with self.subTest(value=value):
@@ -144,6 +157,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
                 run.assert_not_called()
 
     def test_malformed_operator_policy_keeps_precompact_stop_protocol(self):
+        """Verify malformed project policy still yields the PreCompact stop response."""
         policy = self.root / 'policy.json'
         for value in ([], None, {'projects': []}, {'projects': 'wrong'}):
             with self.subTest(value=value):
@@ -153,6 +167,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
                 self.assertIs(result['continue'], False)
 
     def test_malformed_central_index_is_a_safe_snapshot_failure(self):
+        """Verify malformed central index entries cannot bypass the PreCompact stop."""
         store = self.root / 'central/work/handoff'
         store.mkdir(parents=True)
         policy = self.root / 'policy.json'
@@ -166,6 +181,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
                 self.assertIs(result['continue'], False)
 
     def test_precompact_calls_desktop_only_after_pass_and_preserves_stop(self):
+        """Verify only a PASS capture reaches the adapter and both paths return a stop."""
         with mock.patch.object(self.snapshot, '_desktop_successor', return_value=dict(
                 status='successor_created', successor_thread_id=self.successor)) as successor:
             result = self.snapshot.handle_event(self.event, codex_home=self.home)
@@ -179,6 +195,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
             self.assertEqual(successor.call_count, 1)
 
     def test_registered_central_store_is_separate_from_workspace(self):
+        """Verify the bound central working file is saved while preserving the event workspace."""
         central = self.root / 'central-vault'
         store = central / 'work/handoff'
         store.mkdir(parents=True)
@@ -195,6 +212,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
         self.assertEqual(Path(manifest['cwd']), self.cwd)
 
     def test_wrong_workspace_cannot_select_another_central_checkpoint(self):
+        """Verify an unmatched project workspace cannot select its central store binding."""
         policy = self.root / 'policy.json'
         policy.write_text(json.dumps(dict(projects=dict(Fixture=dict(
             workspace=str(self.root / 'other'), handoff_root=str(self.root / 'central/work/handoff'))))), encoding='utf-8')
@@ -203,12 +221,14 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
         self.assertEqual(root, self.cwd)
 
     def test_precompact_agent_identity_is_skipped_without_a_snapshot(self):
+        """Verify an agent-scoped PreCompact event is skipped without snapshot files."""
         self.event['agent_id'] = 'offline-subagent'
         result = self.snapshot.capture_snapshot(self.event, codex_home=self.home)
         self.assertEqual(result['status'], 'SKIPPED')
         self.assertFalse((self.home / 'handoff-snapshots' / self.sid).exists())
 
     def test_global_policy_captures_separate_projects_from_one_central_store(self):
+        """Verify global policy selects each session working file from one central store."""
         store = self.root / 'central/work/handoff'
         store.mkdir(parents=True)
         other = self.root / 'other-workspace'
@@ -232,6 +252,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
                 self.assertEqual(Path(result['cwd']), Path(event['cwd']))
 
     def test_global_policy_refuses_ambiguous_current_session(self):
+        """Verify duplicate central bindings for one session return a snapshot error."""
         store = self.root / 'central/work/handoff'
         store.mkdir(parents=True)
         (store / 'index.json').write_text(json.dumps(dict(projects=dict(
@@ -243,6 +264,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
         self.assertEqual(result['status'], 'ERROR')
 
     def test_existing_snake_journal_survives_snapshot_and_retains_successor(self):
+        """Verify snake_case journal aliases preserve the successor and original journal bytes."""
         pointer = self.cwd / 'work/handoff' / (self.sid + '-status.json')
         raw = json.dumps(dict(origin_thread_id=self.sid, successor_thread_id=self.successor,
                               phase='uptake_confirmed'))
@@ -254,6 +276,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
         self.assertEqual((Path(result['snapshot_path']) / 'status.json').read_text(encoding='utf-8'), raw)
 
     def test_conflicting_journal_aliases_cannot_select_an_origin_or_successor(self):
+        """Verify conflicting identity aliases are rejected before snapshot success."""
         pointer = self.cwd / 'work/handoff' / (self.sid + '-status.json')
         for fields in (dict(originThreadId=str(uuid.uuid4()), origin_thread_id=self.sid),
                        dict(originThreadId=self.sid, successorThreadId=self.successor,
@@ -266,6 +289,7 @@ class SnapshotDesktopBindingTests(unittest.TestCase):
 
 class GuardDesktopBindingTests(unittest.TestCase):
     def setUp(self):
+        """Reuse the isolated context-guard fixture and load its snapshot helper candidate."""
         old = load(HERE / 'context-handoff-guard.test.py', 'guard_fixture_helpers')
         self.base = old.ContextGuardTests('runTest')
         self.base.setUp()
@@ -275,6 +299,7 @@ class GuardDesktopBindingTests(unittest.TestCase):
         self.base.event['turn_id'] = str(uuid.uuid4())
 
     def test_threshold_pass_invokes_existing_adapter_and_returns_stop(self):
+        """Verify a threshold capture invokes the mocked existing adapter exactly once."""
         self.base.checkpoint()
         self.base.usage(800)
         successor = str(uuid.uuid4())
@@ -286,6 +311,7 @@ class GuardDesktopBindingTests(unittest.TestCase):
         launch.assert_called_once()
 
     def test_below_threshold_and_subagent_never_launch_successor(self):
+        """Verify below-threshold and subagent guard events cannot invoke the adapter."""
         self.base.usage(799)
         with mock.patch.object(self.base.guard, '_helpers', return_value=self.snapshot), mock.patch.object(
                 self.snapshot, '_desktop_successor', create=True) as launch:

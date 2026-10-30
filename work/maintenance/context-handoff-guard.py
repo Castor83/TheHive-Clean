@@ -34,6 +34,7 @@ USAGE_ERRORS = {
 
 
 def _positive(value):
+    """Return whether value is a positive integer, explicitly excluding booleans."""
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
@@ -69,6 +70,11 @@ def _observe(event, home, helpers, decision, usage=None, error_code=None, announ
 
 
 def _helpers(home):
+    """Load and return the existing snapshot helper from home/hooks.
+
+    Require the resolved helper to stay under CODEX_HOME; importing executes its
+    module definitions but does not invoke its snapshot entry point.
+    """
     source = (home / 'hooks' / 'pre-compaction-snapshot.py').resolve(strict=True)
     if not source.is_relative_to(home):
         raise ValueError('Snapshot helper escaped CODEX_HOME.')
@@ -133,6 +139,11 @@ def _manual_request(event, transcript):
 
 
 def _request_announcement(event, home, helpers, transcript, usage):
+    """Record a turn-bound announcement request and return PostToolUse feedback.
+
+    Require a canonical turn ID. The feedback asks the assistant to announce the
+    handoff and call the completion CLI; it does not itself capture or open a chat.
+    """
     if not isinstance(event.get('turn_id'), str) or str(uuid.UUID(event['turn_id'])) != event['turn_id']:
         raise ValueError('Actual turn required for visible announcement.')
     minimal = {key: event[key] for key in ('session_id', 'turn_id', 'cwd', 'hook_event_name')}
@@ -150,6 +161,11 @@ def _request_announcement(event, home, helpers, transcript, usage):
 
 
 def _compact_limit(home, cwd, window):
+    """Return the smaller model window or positive configured compaction limit.
+
+    Read bounded home and project config.toml files, with project keys taking
+    precedence. Legacy profile selectors and unverified CLI overrides are ignored.
+    """
     config = {}
     for root in (home, cwd / '.codex'):
         candidate = root / 'config.toml'
@@ -167,6 +183,12 @@ def _compact_limit(home, cwd, window):
 
 
 def _usage(event, home, cwd, helpers, allow_missing=False):
+    """Validate the session transcript and return its path and current usage record.
+
+    Read only a bounded transcript tail and discard usage preceding a compacted
+    marker. Use last_token_usage, never lifetime totals. Missing measurements are
+    allowed for manual saves/requests; unsafe paths or identities raise errors.
+    """
     value = event.get('transcript_path') or ''
     # The Windows host supplies canonical \\?\C:\ paths. Normalize only that
     # drive namespace before comparing against the unchanged local roots.
@@ -228,6 +250,12 @@ def _usage(event, home, cwd, helpers, allow_missing=False):
 def _checkpoint(root, session, workspace=None):
     # Reuse the existing validator, lock and parent/hash verification. Node is a
     # local file reader here; no Codex process, prompt or model is started.
+    """Return a validated summary of this session/workspace checkpoint via Node.
+
+    Reuse the local store reader with a bounded subprocess timeout. An unbound
+    chat task gets a manual-review next step; unavailable or inconsistent state
+    raises ValueError, with a bounded save_error_code where available.
+    """
     code = """
 const {resumeBoundCheckpoint,chatTaskForCheckpoint}=require(process.argv[1]);
 try{
@@ -257,6 +285,13 @@ next_step:continuation?continuation.next_step.text:'Keine automatische Fortsetzu
 
 
 def _capture(event, home, root, transcript, usage, helpers, manual_save=False):
+    """Save or reuse a verified transcript/checkpoint snapshot and return its manifest.
+
+    Require the working projection hash to match the session checkpoint. Serialize
+    capture with an exclusively created lock; write manifests, attempt records
+    and a three-field starter locally. Manual saves may retry in a new turn while
+    retaining the previous attempt. Failed writes raise and retain failure evidence.
+    """
     checkpoint = _checkpoint(root, event['session_id'], event['cwd'])
     working = root / (event['session_id'] + '-working.md')
     if helpers._digest(working) != checkpoint['sha256']:
@@ -385,6 +420,7 @@ def _capture(event, home, root, transcript, usage, helpers, manual_save=False):
 
 
 def _manual_message(desktop):
+    """Return the manual-save confirmation, adding one validated optional start link."""
     visible = '**Arbeitsstand gesichert.**\n\nDie manuelle Sicherung wurde geschrieben und vollständig zurückgelesen.'
     url = desktop.get('manual_start_url')
     if isinstance(url, str) and url.startswith('codex://threads/new?') and len(url) < 16000:
@@ -393,6 +429,13 @@ def _manual_message(desktop):
 
 
 def handle_event(event, *, codex_home=None, handoff_root=None, manual_save=False):
+    """Handle a main-chat PostToolUse event and return hook feedback.
+
+    Validate local session sources, inspect current usage and require a turn-bound
+    announcement before automatic capture/adapter invocation. manual_save bypasses
+    usage thresholds and requests only a manual start offer. Persist bounded local
+    diagnostics; distinguish verified stops from failures that permit save repair.
+    """
     if not isinstance(event, dict):
         return {'systemMessage': 'Kontextwaechter: ungueltige Eingabe; PreCompact-Status separat pruefen.'}
     # Never intercept a new user message with this optional context monitor.
@@ -524,6 +567,11 @@ def handle_event(event, *, codex_home=None, handoff_root=None, manual_save=False
 
 
 def main():
+    """Read one bounded hook event or announcement record and print JSON feedback.
+
+    Manual mode requires the actual caller session, canonical turn and current
+    workspace. Invalid arguments or source bindings produce a safe diagnostic.
+    """
     try:
         manual_save = sys.argv[1:] == ['--manual-save']
         if len(sys.argv) == 3 and sys.argv[1] == '--complete-announcement':
