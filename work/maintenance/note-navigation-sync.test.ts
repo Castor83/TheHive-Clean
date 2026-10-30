@@ -4,19 +4,34 @@ import os from 'node:os';
 import path from 'node:path';
 import { syncNavigation } from './note-navigation-sync.ts';
 
+/**
+ * Create a temporary Fach vault and audited-writer simulation for navigation assertions.
+ * @returns Fixture paths, note accessors, recorded operations and injected writer.
+ */
 function fixture() {
   const vault = fs.mkdtempSync(path.join(os.tmpdir(), 'thehive-navigation-'));
+  /**
+   * Create parent directories and write one temporary fixture file.
+   * @param rel - Fixture-vault-relative path.
+   * @param text - Exact fixture content.
+   */
   const put = (rel: string, text: string) => { const p = path.join(vault, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); };
   put('20_Wissen/Wissensindex.md', '---\ntyp: wissen\nstatus: aktiv\n---\n\n# Wissensindex\n\nManuell erhaltener Text.\n');
   put('20_Wissen/Neu.md', '---\ntyp: wissen\nstatus: aktiv\n---\n\n# Neue Erkenntnis\n\nGepruefter Inhalt.\n');
   const writes: any[] = [];
+  /**
+   * Simulate create/append operations and return a synthetic accepted audit receipt.
+   * @param _vault - Unused interface argument.
+   * @param op - Planned fixture note operation.
+   * @returns Promise for a synthetic one-write batch result.
+   */
   const writer = async (_vault: string, op: any) => {
     writes.push(op); const p = path.join(vault, op.path);
     if (op.kind === 'create_note') put(op.path, '---\ntyp: wissen\n---\n\n' + op.content);
     else fs.appendFileSync(p, '\n\n' + op.content.trim() + '\n');
     return { done: true, applied: 1, results: [{ write_id: 'test-' + writes.length, appended: op.kind === 'append_note', created: op.kind === 'create_note' }] };
   };
-  return { vault, put, writes, writer, read: (rel: string) => fs.readFileSync(path.join(vault, rel), 'utf8') };
+  return { vault, put, writes, writer, read: /** Read UTF-8 content at a fixture-relative note path. */ (rel: string) => fs.readFileSync(path.join(vault, rel), 'utf8') };
 }
 
 test('preview plans ordinary notes in their index without writing', async () => {
@@ -168,6 +183,7 @@ test('vanishing non-Markdown transaction files cannot abort vault inventory',asy
   const f=fixture(),rel='work/handoff/index.json.test.pending';f.put(rel,'temporary transaction');
   const pending=path.join(f.vault,rel),dir=path.dirname(pending),read=fs.readdirSync;
   let removed=false;
+  /** List real fixture entries, then remove the pending transaction file once to simulate a race. */
   (fs as any).readdirSync=function(file:any,...args:any[]){
     const entries=(read as any).call(this,file,...args);
     if(file===dir&&!removed){fs.unlinkSync(pending);removed=true;}

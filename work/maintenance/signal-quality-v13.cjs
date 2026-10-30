@@ -30,8 +30,23 @@ const MAX_OLLAMA_BYTES = 1024 * 1024;
 const MAX_ITEMS = 12;
 const AGENT = 'thehive-ollama-signal-review';
 
+/**
+ * Fingerprint original evidence and review-file bytes.
+ * @param bytes - Source string or buffer.
+ * @returns SHA-256 hex digest.
+ */
 function digest(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
+/**
+ * Abort review processing with a descriptive error.
+ * @param message - Error description.
+ * @returns Never returns.
+ */
 function fail(message) { throw new Error(message); }
+/**
+ * Require explicit review/model selection and reject unknown or repeated CLI flags.
+ * @param args - CLI tokens.
+ * @returns Validated options with the fixed vault and output directory.
+ */
 function parseArgs(args) {
   const opts = { vault: ROOT };
   const names = { '--review-file': 'reviewFile', '--reviewer-model': 'model', '--output-dir': 'outDir' };
@@ -47,6 +62,11 @@ function parseArgs(args) {
   opts.outDir ??= DEFAULT_OUTPUT;
   return opts;
 }
+/**
+ * Read a bounded regular review file and validate session binding and proposal shape.
+ * @param file - Existing producer-review JSON path.
+ * @returns Parsed review data and original-byte hash; semantic approval is not implied.
+ */
 function readReview(file) {
   const st = fs.lstatSync(file);
   if (!st.isFile() || st.isSymbolicLink() || st.size > MAX_REVIEW_BYTES) fail('Ungültige Review-Datei');
@@ -66,6 +86,12 @@ function readReview(file) {
   }
   return { data: r, sha256: digest(bytes) };
 }
+/**
+ * Fetch original imported turns and require the producer review survey hash to match.
+ * @param review - Producer review with session reference and survey hash.
+ * @param runner - Injectable bounded synchronous CLI runner.
+ * @returns OSB extraction plan; the CLI may record survey metadata.
+ */
 function fetchPlan(review, runner = spawnSync) {
   const p = runner(BUN, ['run', CLI, 'brain', 'extract-signals', review.session_ref,
     '--vault', ROOT, '--agent', AGENT, '--json'], {
@@ -79,15 +105,31 @@ function fetchPlan(review, runner = spawnSync) {
       !Array.isArray(result.turns_mined)) fail('Quellbelege unterscheiden sich vom ursprünglichen Bericht');
   return result;
 }
+/**
+ * Detect copied instruction/environment blocks that require separate source review.
+ * @param text - Original user-turn text.
+ * @returns Whether a known embedded-instruction marker occurs.
+ */
 function embeddedInstructions(text) {
   return /^\s*#\s*AGENTS\.md\s+instructions\b/im.test(text) ||
     /<INSTRUCTIONS>|<environment_context>|\[im_start\]system/i.test(text);
 }
+/**
+ * Flag immediate-context wording unless an explicit durability marker is also present.
+ * @param text - Original user-turn text.
+ * @returns Conservative heuristic flag; no semantic judgment is established.
+ */
 function situationalMarker(text) {
   const situational = /\b(gerade|diesmal|schon wieder|jetzt|sofort|heute|momentan|aktuell)\b/i.test(text);
   const explicitDurable = /\b(immer|künftig|zukünftig|grundsätzlich|dauerhaft|jedes mal|von nun an)\b/i.test(text);
   return situational && !explicitDurable;
 }
+/**
+ * Bind proposals to exact original turns and hold sources exceeding review budgets.
+ * @param review - Producer review containing proposed items.
+ * @param turns - Original source-turn records.
+ * @returns Preclassified items and bounded candidates for independent review.
+ */
 function prepare(review, turns) {
   if (!Array.isArray(turns)) fail('Keine prüfbaren Quellbelege');
   const src = new Map();
@@ -115,6 +157,11 @@ function prepare(review, turns) {
   }
   return { preclassified, toReview };
 }
+/**
+ * Constrain reviewer output to one judgment per expected topic and bounded evidence fields.
+ * @param topics - Candidate topic identifiers.
+ * @returns JSON Schema for the local reviewer response.
+ */
 function outputSchema(topics) {
   return { type: 'object', additionalProperties: false, required: ['items'], properties: {
     items: { type: 'array', minItems: topics.length, maxItems: topics.length, items: {
@@ -140,6 +187,13 @@ Judge the ORIGINAL German text versus EACH proposed principle, not its topic or 
 Use the original wording carefully, including double negation. Do not invent facts or quotations.
 For every item, provide an EXACT contiguous quote of at least 8 characters copied verbatim from its source text, plus a concise reason in German.
 Only return a JSON object matching the provided schema. Do NOT automatically approve or commit memories.`;
+/**
+ * Submit bounded source-bound candidates to the explicitly chosen loopback Ollama model.
+ * @param model - Independent reviewer model identifier.
+ * @param candidates - Prepared proposals with their original turns.
+ * @param httpClient - Injectable HTTP transport.
+ * @returns Promise for parsed judgment JSON; does not commit or promote preferences.
+ */
 async function localJudge(model, candidates, httpClient = http) {
   const payload = candidates.map(c => ({ topic: c.topic, principle: c.principle,
     source_turn: c.source_turn, original_user_turn: c.original }));
@@ -167,6 +221,12 @@ async function localJudge(model, candidates, httpClient = http) {
     req.end(data);
   });
 }
+/**
+ * Require complete unique judgments with verbatim source quotes before assigning advisory decisions.
+ * @param candidates - Prepared topic/source records.
+ * @param judgment - Untrusted reviewer response.
+ * @returns Evidence-bound reject/hold/human-review records; never automatic approval.
+ */
 function validateJudgments(candidates, judgment) {
   if (!judgment || !Array.isArray(judgment.items) || judgment.items.length !== candidates.length) fail('Unvollständige Modellprüfung; alles zurückgehalten');
   const lookup = new Map(candidates.map(c => [c.topic, c]));
@@ -190,6 +250,14 @@ function validateJudgments(candidates, judgment) {
   }
   return result;
 }
+/**
+ * Review eligible proposals with a different model and preserve producer item order.
+ * @param reviewData - Validated producer review.
+ * @param planData - Matching source survey and original turns.
+ * @param reviewerModel - Explicit independent local model identifier.
+ * @param judge - Injectable reviewer function.
+ * @returns Promise for an advisory report whose automatic_commit_allowed remains false.
+ */
 async function evaluate(reviewData, planData, reviewerModel, judge = localJudge) {
   if (reviewerModel.toLowerCase() === reviewData.model.toLowerCase()) fail('Erzeuger- und Prüfermodell sind identisch');
   if (planData.surveyed_turns_hash !== reviewData.surveyed_turns_hash) fail('Quellstand verändert');
@@ -214,6 +282,12 @@ async function evaluate(reviewData, planData, reviewerModel, judge = localJudge)
       hold: results.filter(r => r.decision === 'hold').length
     }, results };
 }
+/**
+ * Exclusively create a uniquely named local advisory report in an existing directory.
+ * @param outDir - Existing output directory.
+ * @param report - JSON-serializable review report.
+ * @returns New report path; does not modify the producer review.
+ */
 function writeReport(outDir, report) {
   if (!fs.existsSync(outDir) || !fs.statSync(outDir).isDirectory()) fail('Zielordner fehlt: ' + outDir);
   const file = path.join(outDir, 'signal-quality-v13-independent-' +
@@ -221,6 +295,11 @@ function writeReport(outDir, report) {
   fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
   return file;
 }
+/**
+ * Load the bound producer review, run independent review and print the new report location.
+ * @param argv - Explicit CLI option tokens.
+ * @returns Promise resolving after report creation; invokes OSB and local Ollama.
+ */
 async function main(argv = process.argv.slice(2)) {
   const opts = parseArgs(argv);
   const review = readReview(path.resolve(opts.reviewFile));

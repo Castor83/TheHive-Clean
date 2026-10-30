@@ -1,8 +1,23 @@
 // Restore only stage outcomes. Process ownership always belongs to the new run.
 const KNOWN_STAGES = ['results', 'navigation', 'native', 'learning', 'graph', 'semantic'];
+/**
+ * Recognize non-null object records while excluding arrays.
+ * @param value - Untrusted saved-state field.
+ * @returns Whether value is a record.
+ */
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+/**
+ * Accept strings that Date.parse recognizes as finite timestamps.
+ * @param value - Untrusted saved timestamp.
+ * @returns Whether the timestamp is parseable.
+ */
 const timestamp = value => typeof value === 'string' && Number.isFinite(Date.parse(value));
 
+/**
+ * Restore validated known stage outcomes without reusing process ownership.
+ * @param previous - Prior persisted supervisor state, or undefined for a first run.
+ * @returns Detached stage records; throws rather than resetting malformed state.
+ */
 function resumeStages(previous) {
   if (previous === undefined) return {};
   if (!record(previous) || !record(previous.stages)) throw Error('Prior state must contain a stages object');

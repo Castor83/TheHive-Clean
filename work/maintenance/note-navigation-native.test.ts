@@ -12,6 +12,11 @@ test('native navigation creates and appends with preserved content, exact audit 
   const previousConfig = process.env.OPEN_SECOND_BRAIN_CONFIG;
   const previousAgent = process.env.VAULT_AGENT_NAME;
   const core = path.join(os.homedir(), 'projects/open-second-brain/src/core');
+  /**
+   * Import an installed OSB core module for the isolated native-write fixture.
+   * @param rel - Core-relative module path.
+   * @returns Module import promise.
+   */
   const load = (rel: string) => import(pathToFileURL(path.join(core, rel)).href);
   try {
     fs.writeFileSync(configPath, `vault: ${JSON.stringify(vault.replace(/\\/g, '/'))}\nagent_name: navigation-config-agent\ndevice_id: navigation-test\n`);
@@ -21,11 +26,22 @@ test('native navigation creates and appends with preserved content, exact audit 
       load('brain/init.ts'), load('vault.ts'), load('brain/notes/write-log.ts'),
     ]);
     bootstrapBrain(vault, { configPath });
+    /**
+     * Write a temporary fixture note using OSB frontmatter serialization.
+     * @param rel - Path relative to the temporary vault.
+     * @param meta - Fixture frontmatter object.
+     * @param body - Fixture Markdown body.
+     */
     const put = (rel: string, meta: any, body: string) => {
       const abs = path.join(vault, rel);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.writeFileSync(abs, formatFrontmatter(meta, body));
     };
+    /**
+     * Read a note from the isolated test vault.
+     * @param rel - Fixture-relative note path.
+     * @returns UTF-8 note text.
+     */
     const read = (rel: string) => fs.readFileSync(path.join(vault, rel), 'utf8');
     const sourceMeta = { title: 'Bezug', status: 'aktiv', tags: ['wissen/fakt'], custom: 'manuell gepflegt' };
     const sourceBody = '# Bezug\n\nDiese Erkenntnis betrifft TheHive.\n\nEigener Originaltext.';

@@ -5,15 +5,30 @@ const path=require('node:path');
 const crypto=require('node:crypto');
 const before='this.logger.debug("Sending response for:",l.method,l.id),o.code(200).header("Content-Type","application/json").send(u)';
 const after='this.logger.debug("Sending response for:",l.method,l.id);const responseBody=JSON.stringify(u);o.code(200).header("Content-Type","application/json").header("Content-Length",Buffer.byteLength(responseBody,"utf8")).send(responseBody)';
+/**
+ * Replace exactly one known plugin reply expression with explicit UTF-8 JSON framing.
+ * @param source - Installed JavaScript source text.
+ * @returns Patched source; refuses changed, repeated or already patched expressions.
+ */
 function patched(source){
   if(typeof source!=='string'||source.split(before).length!==2||source.includes(after))throw Error('Installed route differs or is ambiguous; repair refused');
   return source.replace(before,after);
 }
+/**
+ * Write a hash-bound repair candidate and plan without replacing or reloading the plugin.
+ * @param root - Vault containing vault-as-mcp 1.2.1.
+ * @returns Preparation report with installed and candidate paths/hashes.
+ */
 function prepare(root='C:/TheHive'){
   const plugin=path.join(root,'.obsidian/plugins/vault-as-mcp');
   const manifest=JSON.parse(fs.readFileSync(path.join(plugin,'manifest.json'),'utf8'));
   if(manifest.id!=='vault-as-mcp'||manifest.version!=='1.2.1')throw Error('Unexpected plugin version; inspect first');
   const file=path.join(plugin,'main.js'),original=fs.readFileSync(file),candidate=Buffer.from(patched(original.toString('utf8')));
+  /**
+   * Fingerprint installed and candidate bytes for the repair plan.
+   * @param bytes - Raw plugin bytes.
+   * @returns SHA-256 hex digest.
+   */
   const sha=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
   const originalHash=sha(original),candidateHash=sha(candidate);
   const dir=path.join(root,'work/maintenance/repairs',originalHash.slice(0,16)+'-fixed-length');

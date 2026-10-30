@@ -32,10 +32,28 @@ const EXCLUDES = [
   '20_Wissen/TheHive-Abnahmetest-20261023.md', '10_Projekte/OpenCode-Dateitest.md',
   'MCP-Verbindungstest.md',
 ];
+/**
+ * Fingerprint configuration, source bytes and maintenance contracts.
+ * @param value - Bytes or text to hash.
+ * @returns SHA-256 hex digest.
+ */
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
+/**
+ * Capture the current UTC time for persisted maintenance evidence.
+ * @returns ISO 8601 timestamp.
+ */
 const now = () => new Date().toISOString();
+/**
+ * Read and parse an existing UTF-8 JSON file without fallback/reset.
+ * @param file - Absolute JSON path.
+ * @returns Parsed value; read/parse errors propagate.
+ */
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 
+/**
+ * Probe free memory on CUDA device zero and choose CPU unless the bounded check passes.
+ * @returns Device selection evidence; does not load a model or alter GPU processes.
+ */
 function selectDevice() {
   const base = { selected: 'cpu', cpu_only: true, checked_at: now(), gpu_index: 0, min_free_mb: CUDA_MIN_FREE_MB };
   // Read only the default CUDA device; free memory on a different card would
@@ -51,9 +69,17 @@ function selectDevice() {
   return { ...base, selected: 'cuda', cpu_only: false, free_mb: freeMb, reason: 'existing_gpu_has_required_free_vram' };
 }
 
+/**
+ * Replace worker HTTP, fetch and socket entrypoints with throwing guards before qmd imports.
+ * @returns Verified CommonJS/ESM guard evidence; mutations are local to this process.
+ */
 async function blockWorkerNetwork() {
   // Defense in depth, installed ONLY in this finite worker before qmd imports.
   // Local model binding and packaged-only runtime remain the primary contract.
+  /**
+   * Reject a network attempt inside the finite semantic worker.
+   * @returns Never returns; always throws.
+   */
   const deny = () => { throw Error('Network access is disabled in TheHive semantic worker'); };
   globalThis.fetch = async () => deny();
   const http = require('node:http'), https = require('node:https');
@@ -74,6 +100,11 @@ async function blockWorkerNetwork() {
   return { fetch_blocked: true, http_https_blocked: true, net_tls_blocked: true, esm_bindings_verified: true, builtin_exports_synced: synced, scope: 'this worker process only' };
 }
 
+/**
+ * Write JSON through an exclusive temporary file, retrying transient rename errors.
+ * @param file - Destination path.
+ * @param value - JSON-serializable report or request.
+ */
 function atomicJson(file, value) {
   const temp = file + '.' + process.pid + '.tmp';
   fs.writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { flag: 'wx' });
@@ -86,6 +117,10 @@ function atomicJson(file, value) {
   }
 }
 
+/**
+ * Check the approved local model size, regular-file status and GGUF magic.
+ * @returns Model path, size and mtime; this is not a full content hash check.
+ */
 function modelCheck() {
   const st = fs.lstatSync(MODEL);
   if (!st.isFile() || st.isSymbolicLink() || st.size !== 639150592) throw Error('Existing approved Qwen GGUF is absent or has changed size');
@@ -96,6 +131,10 @@ function modelCheck() {
   return { path: MODEL, bytes: st.size, mtime_ms: st.mtimeMs };
 }
 
+/**
+ * Validate the existing qmd version, single collection and model/configuration contract.
+ * @returns Parsed config, original bytes/hash, package resolver and merged exclusions.
+ */
 function configuration() {
   const bytes = fs.readFileSync(CONFIG);
   const localRequire = createRequire(path.join(PKG, 'package.json'));
@@ -110,6 +149,11 @@ function configuration() {
   return { cfg, bytes, sha256: sha(bytes), localRequire, ignores: [...new Set([...col.ignore, ...EXCLUDES])] };
 }
 
+/**
+ * Fingerprint the bounded Markdown corpus using the validated ignore policy.
+ * @param conf - Validated configuration and package-local glob resolver.
+ * @returns Nonempty path/hash records and empty paths; refuses files resolved outside the vault.
+ */
 function sources(conf) {
   const glob = conf.localRequire('fast-glob');
   const files = glob.sync('**/*.md', { cwd: ROOT, onlyFiles: true, followSymbolicLinks: false, dot: false, ignore: conf.ignores }).sort();
@@ -128,11 +172,22 @@ function sources(conf) {
   return { nonempty, empty };
 }
 
+/**
+ * Hash the installed qmd store, LLM and database entrypoints.
+ * @returns Package-relative file to SHA-256 map used for parent/worker consistency.
+ */
 function sourceContract() {
   const files = ['dist/store.js', 'dist/llm.js', 'dist/db.js'];
   return Object.fromEntries(files.map(file => [file, sha(fs.readFileSync(path.join(PKG, file)))]));
 }
 
+/**
+ * Acquire an exclusive lock, archiving only a demonstrably dead recorded owner.
+ * @param file - Lock path.
+ * @param token - Ownership nonce for JSON locks.
+ * @param qmdFormat - Use qmd single-PID format when true.
+ * @returns Release callback that removes only the still-matching owner lock.
+ */
 function takeLock(file, token, qmdFormat = false) {
   const content = qmdFormat ? `${process.pid}\n` : JSON.stringify({ pid: process.pid, token, started_at: now() }) + '\n';
   try { fs.writeFileSync(file, content, { flag: 'wx' }); }
@@ -156,6 +211,12 @@ function takeLock(file, token, qmdFormat = false) {
   };
 }
 
+/**
+ * Create or validate a fingerprint-specific config and SQLite online backup.
+ * @param fingerprint - Corpus/config/model contract key.
+ * @param conf - Validated configuration bytes and hash.
+ * @returns Backup directory; incomplete prior directories are preserved and block replacement.
+ */
 async function backupOnce(fingerprint, conf) {
   const target = path.join(DIR, 'semantic-backups', fingerprint);
   const marker = path.join(target, 'complete.json');
@@ -182,6 +243,13 @@ async function backupOnce(fingerprint, conf) {
   return target;
 }
 
+/**
+ * Launch the finite Bun worker with bounded logs, device settings and termination deadlines.
+ * @param requestFile - Validated worker request JSON path.
+ * @param logFile - New log destination.
+ * @param device - Parent device selection evidence.
+ * @returns Promise for exit/log metadata; retains locks for a worker that fails to stop.
+ */
 function runWorker(requestFile, logFile, device) {
   return new Promise((resolve, reject) => {
     const fd = fs.openSync(logFile, 'wx');
@@ -193,12 +261,19 @@ function runWorker(requestFile, logFile, device) {
         QMD_CONFIG_DIR: path.dirname(CONFIG), XDG_CACHE_HOME: path.join(USER, '.cache'),
         HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', NO_COLOR: '1' },
     });
+    /**
+     * Retain only the configured log budget while counting all child output bytes.
+     * @param chunk - Child stdout/stderr buffer.
+     */
     const capture = chunk => {
       if (settled) return;
       seen += chunk.length;
       if (kept < LOG_BYTES) { const part = chunk.subarray(0, LOG_BYTES - kept); fs.writeSync(fd, part); kept += part.length; }
     };
     child.stdout.on('data', capture); child.stderr.on('data', capture);
+    /**
+     * Mark timeout/interruption and request termination of this owned worker.
+     */
     const stop = () => { timedOut = true; child.kill('SIGKILL'); };
     process.once('SIGINT', stop); process.once('SIGTERM', stop);
     const timer = setTimeout(stop, MAX_MS);
@@ -215,6 +290,12 @@ function runWorker(requestFile, logFile, device) {
       } catch {}
       finish(Error('Worker PID ' + child.pid + ' failed to close after termination request'));
     }, MAX_MS + 10000);
+    /**
+     * Settle the worker once, close the log and clear timers and signal listeners.
+     * @param error - Failure that rejects the worker promise, if present.
+     * @param code - Child exit code.
+     * @param signal - Child termination signal.
+     */
     function finish(error, code, signal) {
       if (settled) return; settled = true; clearTimeout(timer); clearTimeout(hardTimer);
       process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); fs.closeSync(fd);
@@ -226,6 +307,11 @@ function runWorker(requestFile, logFile, device) {
   });
 }
 
+/**
+ * Reindex locally and commit a bounded number of resumable embedding chunks.
+ * @param requestFile - Parent request binding config, package hashes, model metadata and device.
+ * @returns Promise resolving after result persistence and runtime disposal; updates qmd SQLite.
+ */
 async function worker(requestFile) {
   const networkGuard = await blockWorkerNetwork();
   const request = readJson(requestFile);
@@ -319,6 +405,10 @@ async function worker(requestFile) {
   }
 }
 
+/**
+ * Dispatch status/worker mode or run one locked, backed-up semantic maintenance pass.
+ * @returns Promise; prints status and persists failure evidence before releasing owned locks.
+ */
 async function main() {
   if (process.argv[2] === '--qmd-worker') { if (process.argv.length !== 4) throw Error('Invalid worker arguments'); await worker(process.argv[3]); return; }
   if (process.argv.length > 3 || (process.argv[2] && process.argv[2] !== '--status')) throw Error('Usage: node semantic-sync.cjs [--status]');

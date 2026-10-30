@@ -5,16 +5,35 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
+/**
+ * Hash source bytes or text for content and write-request identity.
+ * @param data - UTF-8 text or raw bytes.
+ * @returns SHA-256 hex digest.
+ */
 const sha = (data: string | Buffer) => crypto.createHash('sha256').update(data).digest('hex');
 const ROOT = 'C:/TheHive';
 const MAX_BYTES = 128 * 1024;
 const LOCK_KIND = 'thehive-project-results-lock/v1';
+/**
+ * Identify the generated source view belonging to one registered project.
+ * @param id - Validated project identifier.
+ * @returns HTML ownership marker.
+ */
 const marker = (id: string) => `<!-- thehive-project-knowledge:v1 project=${id} -->`;
+/**
+ * Persist JSON through an exclusive temporary file and rename.
+ * @param file - Destination state/status path.
+ * @param value - JSON-serializable state.
+ */
 function atomic(file: string, value: any) {
   const temp = file + '.' + crypto.randomUUID() + '.tmp';
   fs.writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { flag: 'wx' });
   fs.renameSync(temp, file);
 }
+/**
+ * Reject symbolic links on an existing path and all its ancestors.
+ * @param file - Source or target path to inspect.
+ */
 function noLinks(file: string) {
   let cursor = path.resolve(file);
   for (;;) {
@@ -22,16 +41,33 @@ function noLinks(file: string) {
     const parent = path.dirname(cursor); if (parent === cursor) break; cursor = parent;
   }
 }
+/**
+ * Check strict containment using a relative path, excluding the root itself.
+ * @param root - Allowed directory.
+ * @param candidate - Resolved candidate path.
+ * @returns Whether candidate is a descendant of root.
+ */
 function within(root: string, candidate: string) {
   const rel = path.relative(root, candidate);
   return rel !== '' && !rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel);
 }
+/**
+ * Resolve a registered relative source path without allowing traversal or the root.
+ * @param root - Registered workspace.
+ * @param rel - Source-relative path.
+ * @returns Absolute descendant path; throws on escape.
+ */
 function bound(root: string, rel: string) {
   if (typeof rel !== 'string' || path.isAbsolute(rel) || rel.split(/[\\/]/).includes('..')) throw Error('Source path escapes registered workspace');
   const target = path.resolve(root, rel);
   if (!within(root, target)) throw Error('Source path escapes registered workspace');
   return target;
 }
+/**
+ * Read bounded regular Markdown and reject unstable, linked or secret-looking input.
+ * @param file - Absolute source path.
+ * @returns Source text, SHA-256 and modification timestamp.
+ */
 function stable(file: string) {
   noLinks(file);
   const before = fs.statSync(file);
@@ -43,7 +79,17 @@ function stable(file: string) {
   if (/-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,})\b|\bBearer\s+[A-Za-z0-9._~-]{20,}|\b(?:api[_-]?key|access[_-]?token|password)\s*[:=]\s*["']?[^\s"']{12,}/i.test(text)) throw Error('Credential/secret-looking source refused');
   return { path: file, sha256: sha(bytes), modified_at: after.mtime.toISOString(), text };
 }
+/**
+ * Quote every source line so the generated view presents it as source data.
+ * @param text - Original Markdown.
+ * @returns Blockquoted Markdown.
+ */
 const quote = (text: string) => text.split(/\r?\n/).map(line => '> ' + line).join('\n');
+/**
+ * Validate one registry entry and build a view from its checkpoint and latest reports.
+ * @param project - Explicit workspace, thread and report-directory registration.
+ * @returns Generated body, source records, fingerprint and target path; reads sources only.
+ */
 function collect(project: any) {
   if (!project || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(project.id) || !/^[0-9a-f]{8}-[0-9a-f-]{27}$/.test(project.thread_id)) throw Error('Invalid registered project/thread identity');
   if (!path.isAbsolute(project.workspace) || /^\\\\/.test(project.workspace)) throw Error('Explicit local absolute workspace required');
@@ -81,6 +127,13 @@ function collect(project: any) {
     `\nNicht mehr vorhandene Markdown-Berichtsverweise: ${missingReports.size}.\nWeitere ältere Markdown-Berichtsverweise: ${Math.max(0, reports.size - selected.length)}; Originalarbeitsstand enthält die Pfade. JSON/JSONL, Konfigurationen und Rohchats werden nicht übernommen.\n`;
   return { fingerprint, body, sources, target: `10_Projekte/${project.id}-Quellenansicht.md` };
 }
+/**
+ * Await one audited OSB write under the intake identity, then restore the prior identity.
+ * @param vault - Target vault.
+ * @param op - Create/update operation.
+ * @param requestId - Idempotency key.
+ * @returns OSB write result; may write the generated target and audit metadata.
+ */
 async function osbWriter(vault: string, op: any, requestId: string) {
   // Same process-local identity and existing gate config as the Codex MCP registration.
   const previousAgent = process.env.VAULT_AGENT_NAME;
@@ -94,6 +147,11 @@ async function osbWriter(vault: string, op: any, requestId: string) {
     else process.env.VAULT_AGENT_NAME = previousAgent;
   }
 }
+/**
+ * Validate registered sources and owned targets before importing generated views.
+ * @param options - Vault, registry, state directory, preview and optional writer hooks.
+ * @returns Per-project intake outcomes; preview still creates and releases the state lock.
+ */
 export async function syncKnowledge(options: any = {}) {
   const vault = path.resolve(options.vault ?? ROOT);
   const registry = options.registry ?? path.join(vault, 'work/maintenance/project-knowledge-sources.json');

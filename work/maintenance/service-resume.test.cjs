@@ -19,6 +19,11 @@ test('navigation participates before indexing and exposes protected-note partial
 const entry = path.join(__dirname, 'thehive-service.cjs');
 const directory = 'C:/TheHive/work/maintenance';
 const statePath = directory + '/service-state.json';
+/**
+ * Normalize Windows and slash paths for the in-memory filesystem.
+ * @param value - Fixture path.
+ * @returns Lowercase slash-separated map key.
+ */
 const key = value => String(value).replaceAll('\\', '/').toLowerCase();
 const future = '2099-10-27T12:00:00.000Z';
 const failedSemantic = {
@@ -31,34 +36,79 @@ const failedSemantic = {
 
 // Run the real supervisor against memory-only files and child-process events.
 // No service, model, production state file or external program is started.
+/**
+ * Execute the real supervisor inside a VM with simulated files, children and timers.
+ * @param prior - Optional saved state or malformed state text.
+ * @param mode - Supervisor CLI mode.
+ * @param outcomes - Stage output records or per-call outcome factories.
+ * @param setupFiles - Optional mutation of the initial in-memory files.
+ * @returns Captured calls, writes, output and process state; starts no maintenance service.
+ */
 async function supervise(prior, mode = '--once', outcomes = {}, setupFiles = () => {}) {
   const files = new Map([[key('C:/TheHive/graphify-out/.graphify_python'), 'C:/Python/python.exe']]);
   if (prior !== undefined) files.set(key(statePath), typeof prior === 'string' ? prior : JSON.stringify(prior));
   setupFiles(files);
   const calls = [], stateWrites = [], output = [], errors = [], timeouts = [];
   const fileSystem = {
+    /**
+     * Check only the simulated filesystem for a fixture path.
+     * @param file - Fixture path.
+     * @returns Whether a normalized key exists.
+     */
     existsSync: file => files.has(key(file)),
+    /**
+     * Read fixture bytes/text or raise a simulated ENOENT error.
+     * @param file - Fixture path.
+     * @returns Stored in-memory value.
+     */
     readFileSync(file) {
       if (!files.has(key(file))) throw Object.assign(new Error('missing fixture'), { code: 'ENOENT' });
       return files.get(key(file));
     },
+    /**
+     * Store fixture content while emulating exclusive-create collisions.
+     * @param file - Fixture path.
+     * @param data - Content to store.
+     * @param options - Optional wx creation flag.
+     */
     writeFileSync(file, data, options) {
       if (options?.flag === 'wx' && files.has(key(file))) throw new Error('fixture already exists');
       files.set(key(file), data);
     },
+    /**
+     * Move an in-memory file and capture persisted supervisor-state snapshots.
+     * @param from - Existing fixture key.
+     * @param to - Destination fixture key.
+     */
     renameSync(from, to) {
       const data = files.get(key(from));
       files.set(key(to), data); files.delete(key(from));
       if (key(to) === key(statePath)) stateWrites.push(JSON.parse(data));
     },
+    /**
+     * Remove a fixture file from the in-memory filesystem.
+     * @param file - Fixture path.
+     * @returns Whether the file existed.
+     */
     unlinkSync: file => files.delete(key(file)),
   };
   const fakeProcess = {
     argv: ['node', entry, mode], execPath: 'C:/Node/node.exe', pid: 42001,
     env: { SystemRoot: 'C:/Windows', TEST_KEEP: 'kept', VAULT_AGENT_NAME: 'other-agent' },
     platform: 'test', on() {},
+    /**
+     * Simulate a dead recorded owner for PID liveness probes.
+     * @returns Never returns; throws ESRCH.
+     */
     kill() { throw Object.assign(new Error('not alive'), { code: 'ESRCH' }); },
   };
+  /**
+   * Create a fake child and emit the configured stage output/close events asynchronously.
+   * @param executable - Requested child executable, recorded only.
+   * @param args - Requested stage arguments.
+   * @param options - Requested environment and launch options.
+   * @returns EventEmitter child; no process is spawned.
+   */
   function spawn(executable, args, options) {
     calls.push({ executable, args, options });
     const child = new EventEmitter();
@@ -75,6 +125,11 @@ async function supervise(prior, mode = '--once', outcomes = {}, setupFiles = () 
     return child;
   }
   const context = {
+    /**
+     * Resolve injected filesystem/process APIs and real local pure dependencies for the VM.
+     * @param name - Requested module identifier.
+     * @returns Fixture adapter or normal module exports.
+     */
     require(name) {
       if (name === 'node:fs') return fileSystem;
       if (name === 'node:child_process') return { spawn, execFile() { throw new Error('Unexpected process action'); } };
@@ -84,6 +139,12 @@ async function supervise(prior, mode = '--once', outcomes = {}, setupFiles = () 
     __filename: entry,
     process: fakeProcess,
     console: { log: value => output.push(value), error: value => errors.push(value) },
+    /**
+     * Record timeouts and immediately queue only drain-mode one-second waits.
+     * @param callback - Timer callback.
+     * @param milliseconds - Requested delay.
+     * @returns Synthetic timer identifier.
+     */
     setTimeout(callback, milliseconds) { timeouts.push(milliseconds); if (mode === '--drain' && milliseconds === 1000) queueMicrotask(callback); return timeouts.length; },
     clearTimeout() {},
   };

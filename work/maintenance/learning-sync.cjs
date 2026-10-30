@@ -36,10 +36,12 @@ for (let i = 0; i < args.length; i++) {
     if (!['event', 'daily', 'manual'].includes(reason)) throw new Error('Expected --reason event|daily|manual');
   }
 }
+/** Read a local JSON file; return the supplied fallback only when it is absent. Malformed or unreadable state remains an error. */
 function readJson(file, fallback = null) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch (e) { if (e.code === 'ENOENT') return fallback; throw e; }
 }
+/** Write JSON through an exclusive temporary file and bounded rename retries; propagate failures without silently resetting existing state. */
 function writeJson(file, value) {
   const temp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { flag: 'wx' });
@@ -51,10 +53,14 @@ function writeJson(file, value) {
     }
   }
 }
+/** Return the SHA-256 digest of the bytes at file; propagate filesystem errors. */
 function hash(file) { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); }
+/** Hash the JSON representation of value for deterministic manifest comparisons. */
 function digest(value) { return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
+/** Walk root in sorted order and return relative file sizes and hashes, honoring exclude. Reject links and unsupported filesystem entries. */
 function manifest(root, exclude = () => false) {
   const files = {};
+  /** Accumulate file fingerprints under dir using rel as the relative prefix; reject links before descending. */
   function walk(dir, rel) {
     const stat = fs.lstatSync(dir);
     if (stat.isSymbolicLink()) throw new Error(`Refusing link/reparse path: ${dir}`);
@@ -73,6 +79,7 @@ function manifest(root, exclude = () => false) {
 }
 // Exclude only outputs of this adapter's engine; changes to inbox, log,
 // preferences, rules, config and source code all invalidate the skip key.
+/** Fingerprint protected Brain inputs, installed engine source, runtime and adapter. Exclude only reviewed generated Dream outputs. */
 function inputState() {
   return {
     brain: manifest(BRAIN, p => ['active.md', 'lessons.md'].includes(p) || /^(\.snapshots|dream)(\/|$)/.test(p)),
@@ -81,6 +88,7 @@ function inputState() {
     adapter: hash(__filename)
   };
 }
+/** Read an explicitly configured integer field from a named YAML policy section; reject missing policy values rather than invent defaults. */
 function scalar(text, section, field) {
   const lines = text.split(/\r?\n/), start = lines.findIndex(s => s === `${section}:`);
   if (start < 0) throw new Error(`Missing explicit policy section: ${section}`);
@@ -91,6 +99,7 @@ function scalar(text, section, field) {
   }
   throw new Error(`Missing explicit integer policy: ${section}.${field}`);
 }
+/** Run the installed Dream CLI with extra arguments and a fixed time, recording bounded output in report under label. Reject timeouts, nonzero exits and invalid JSON. */
 function engine(extra, now, report, label) {
   const argv = ['run', CLI, 'brain', 'dream', 'run', '--vault', ROOT,
     '--json', '--gate', 'heal_enrich=false', '--agent', AGENT, '--now', now, ...extra];
@@ -104,6 +113,7 @@ function engine(extra, now, report, label) {
   if (parsed.ok === false) throw new Error(`Dream ${label} refused`);
   return parsed;
 }
+/** Validate a Dream summary and return only reviewed action lists. Require dry-run evidence for preview and reject deferred or unapproved actions. */
 function safeSummary(s, preview) {
   if (!s || typeof s.changed !== 'boolean' || (preview && s.dry_run !== true)) throw new Error('Unexpected Dream summary contract');
   const known = new Set(['run_id', 'changed', 'new_unconfirmed', 'confirmed', 'retired', 'contradictions', 'moved_to_processed',
@@ -123,6 +133,7 @@ function safeSummary(s, preview) {
   }
   return { new_unconfirmed: s.new_unconfirmed, confirmed: s.confirmed, moved_to_processed: s.moved_to_processed };
 }
+/** Check snapshot retention against current archives; return counts only if a new snapshot cannot remove existing evidence. */
 function noDeletionGuard(policy) {
   const retention = scalar(policy, 'snapshots', 'retention_count');
   const dir = path.join(BRAIN, '.snapshots');
@@ -132,6 +143,7 @@ function noDeletionGuard(policy) {
   if (retention < 1 || count + 1 > retention) throw new Error('Snapshot retention would remove an existing archive; maintenance stopped without deletion');
   return { snapshots_before: count, retention_count: retention };
 }
+/** Copy Brain into a new report backup and verify both manifests remain identical; return the original manifest or fail without claiming a verified backup. */
 function backup(report) {
   const before = manifest(BRAIN), target = path.join(report, 'backup', 'Brain');
   fs.cpSync(BRAIN, target, { recursive: true, errorOnExist: true, force: false, dereference: false });
@@ -139,6 +151,7 @@ function backup(report) {
   writeJson(path.join(report, 'backup-manifest.json'), before);
   return before;
 }
+/** Compare before/after manifests with expected moves; return changed paths, rejecting unexpected writes or lost evidence. */
 function verifyChanges(before, after, expected) {
   const moved = new Set(expected.moved_to_processed);
   const changes = [];
@@ -157,6 +170,7 @@ function verifyChanges(before, after, expected) {
   }
   return changes;
 }
+/** Process status, explicit recovery or one guarded learning pass from CLI arguments. Persist evidence, respect force barriers and release the owned run lock on completion. */
 function main() {
   if (args.includes('--status')) { console.log(JSON.stringify(readJson(STATUS, { status: 'not_initialized', collection: COLLECTION }))); return; }
   fs.mkdirSync(DIR, { recursive: true });

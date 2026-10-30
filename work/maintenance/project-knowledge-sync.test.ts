@@ -5,6 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 const modulePath = './project-knowledge-sync.ts';
+/**
+ * Load the intake API and assert that the expected exported function exists.
+ * @returns Promise for syncKnowledge; unrelated import failures propagate.
+ */
 async function api() {
   let mod: any;
   try { mod = await import(modulePath); } catch (error: any) {
@@ -13,6 +17,10 @@ async function api() {
   assert.equal(typeof mod?.syncKnowledge, 'function', 'registered project result intake must exist');
   return mod.syncKnowledge;
 }
+/**
+ * Create an isolated registered workspace, source report and generated-view writer.
+ * @returns Fixture paths/options plus a write counter; no live vault is used.
+ */
 function fixture() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'thehive-results-'));
   const vault = path.join(base, 'vault'), workspace = path.join(base, 'project');
@@ -29,6 +37,12 @@ function fixture() {
     checkpoint: `work/handoff/${thread}-working.md`, reports_dir: 'work/verification' };
   fs.writeFileSync(registry, JSON.stringify({ schema_version: 1, projects: [project] }));
   let writes = 0;
+  /**
+   * Simulate a successful OSB generated-view write in the temporary vault.
+   * @param v - Fixture vault root.
+   * @param op - Create/update operation to materialize.
+   * @returns Promise for a synthetic audit receipt; increments the fixture counter.
+   */
   const writer = async (v: string, op: any) => {
     writes++;
     const file = path.join(v, op.path);
@@ -37,7 +51,7 @@ function fixture() {
   };
   return { base, vault, workspace, source, report, registry, project, writer,
     stateDir: path.join(base, 'state'), target: path.join(vault, '10_Projekte/OpenCode-Quellenansicht.md'),
-    writes: () => writes };
+    writes: /** Return the number of simulated accepted target writes. */ () => writes };
 }
 test('registered source plus referenced report is ingested once; later correction replaces only generated view', async () => {
   const sync = await api(), f = fixture();

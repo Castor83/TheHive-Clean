@@ -22,6 +22,11 @@ const PROMPT_SYSTEM = [
   'For each item include source_turn: the exact turn_id of the user turn that clearly states the rule.',
   'Never invent turn IDs. Return {"items":[]} if you cannot find an explicit durable work rule.',
 ].join(' ');
+/**
+ * Parse preview/commit arguments and require a confirmed hash for committing.
+ * @param argv - CLI tokens without the executable and script.
+ * @returns Validated options with an explicit vault and safe session basename.
+ */
 function argsParse(argv) {
   const o = { commit: false };
   const valued = { '--session-ref': 'sessionRef', '--model': 'model', '--review-file': 'reviewFile', '--confirm-sha256': 'confirm', '--vault': 'vault' };
@@ -42,11 +47,27 @@ function argsParse(argv) {
   o.vault = o.vault || process.env.THEHIVE_ROOT || 'C:\\TheHive';
   return o;
 }
+/**
+ * Fingerprint review bytes or serialized payloads.
+ * @param value - Text or bytes to hash.
+ * @returns SHA-256 hex digest.
+ */
 const sha = (value) => crypto.createHash('sha256').update(value).digest('hex');
+/**
+ * Resolve the installed OSB source, Bun executable and CLI with supported overrides.
+ * @param home - User home used when environment overrides are absent.
+ * @returns Windows paths for the local CLI invocation.
+ */
 function sourcePaths(home = os.homedir()) {
   const source = process.env.OSB_SOURCE || path.win32.join(home, 'projects', 'open-second-brain');
   return { source, bun: process.env.BUN_EXE || path.win32.join(home, '.bun', 'bin', 'bun.exe'), cli: path.win32.join(source, 'src', 'cli', 'main.ts') };
 }
+/**
+ * Run the bounded local OSB brain CLI and require a successful JSON result.
+ * @param args - Arguments following brain.
+ * @param spawn - Injectable synchronous process runner.
+ * @returns Parsed OSB output; invoked commands may persist survey or signal metadata.
+ */
 function runCli(args, spawn = spawnSync) {
   const { source, bun, cli } = sourcePaths();
   const res = spawn(bun, ['run', cli, 'brain', ...args, '--json'], {
@@ -59,6 +80,13 @@ function runCli(args, spawn = spawnSync) {
   if (!output || typeof output !== 'object' || output.ok === false) throw Error('OSB-CLI meldet keinen Erfolg');
   return output;
 }
+/**
+ * Obtain and validate the OSB extraction plan for one imported session.
+ * @param sessionRef - Safe imported-session basename.
+ * @param vault - Vault passed to OSB.
+ * @param cli - Injectable OSB command adapter.
+ * @returns Validated plan; OSB may record normal survey metadata.
+ */
 function plan(sessionRef, vault, cli = runCli) {
   const p = cli(['extract-signals', sessionRef, '--vault', vault, '--agent', AGENT]);
   if (p.session_id !== sessionRef || !HASH.test(p.surveyed_turns_hash) || !Array.isArray(p.turns_mined)) throw Error('Unerwartete OSB-Planstruktur');
@@ -69,6 +97,11 @@ function plan(sessionRef, vault, cli = runCli) {
   for (const t of p.turns_mined) if (!t || typeof t.turn_id !== 'string' || typeof t.text !== 'string') throw Error('Ungültiger Nutzerbeitrag im Plan');
   return p;
 }
+/**
+ * Split mined user turns within the prompt budget while retaining OSB instructions.
+ * @param p - Validated extraction plan with an LLM step.
+ * @returns Prompt strings; each source text is limited to its first 2000 characters.
+ */
 function batches(p) {
   // Use OSB's entire instruction prefix, only split the turn material.
   const separator = p.llm_step.prompt.indexOf('\n\n');
@@ -84,6 +117,13 @@ function batches(p) {
   if (chunk.length) chunks.push(header + '\n\n' + chunk.join('\n'));
   return chunks;
 }
+/**
+ * Request a bounded JSON response from the local Ollama chat API.
+ * @param model - Explicit local model identifier.
+ * @param prompt - Extraction instructions and quoted source turns.
+ * @param timeoutMs - Socket timeout in milliseconds.
+ * @returns Promise for parsed message content; sends source text to loopback Ollama.
+ */
 function localOllama(model, prompt, timeoutMs = 240000) {
   const input = JSON.stringify({ model, stream: false, format: 'json', options: { temperature: 0 }, messages: [
     { role: 'system', content: PROMPT_SYSTEM },
@@ -107,6 +147,12 @@ function localOllama(model, prompt, timeoutMs = 240000) {
     req.on('error', reject); req.end(input);
   });
 }
+/**
+ * Validate proposal fields, confidence, unique topics and cited source-turn membership.
+ * @param p - Plan containing item limits and allowed source turns.
+ * @param items - Untrusted model proposals.
+ * @returns Normalized proposals; does not establish semantic truth or human approval.
+ */
 function validateItems(p, items) {
   if (!Array.isArray(items) || items.length > p.cap) throw Error(`Ungültige Anzahl Signale; höchstens ${p.cap}`);
   const allowedTurnIds = new Set(p.turns_mined.map(t => t.turn_id));
@@ -126,6 +172,13 @@ function validateItems(p, items) {
   }
   return result;
 }
+/**
+ * Generate and validate bounded proposal batches, then exclusively write a review file.
+ * @param o - Validated preview options.
+ * @param cli - Injectable OSB plan adapter.
+ * @param generate - Injectable local generation function.
+ * @returns Review path/hash and proposals, or nothing-to-mine; does not commit signals.
+ */
 async function preview(o, cli = runCli, generate = localOllama) {
   const p = plan(o.sessionRef, o.vault, cli);
   if (p.llm_step === null) return { status: 'nothing_to_mine', reason: p.skipped?.reason || 'no_llm_step', session_ref: o.sessionRef };
@@ -169,6 +222,12 @@ async function preview(o, cli = runCli, generate = localOllama) {
   return { status: 'review_ready', session_ref: o.sessionRef, reviewed_file: file, review_sha256: sha(fs.readFileSync(file)), signal_count: vetted.length, items: vetted,
     note: 'Nur Review-Datei gespeichert. Nach Sichtprüfung ist --commit mit dem Review-Hash nötig. Der OSB-Plan kann Survey-Metadaten im Vault erfassen.' };
 }
+/**
+ * Recheck the confirmed review hash and current survey before submitting proposals to OSB.
+ * @param o - Commit options including review path and confirmed SHA-256.
+ * @param cli - Injectable OSB command adapter.
+ * @returns OSB write/staging summary; temporary payload is removed in finally.
+ */
 function commit(o, cli = runCli) {
   const file = path.resolve(o.reviewFile);
   const lstat = fs.lstatSync(file);
@@ -193,6 +252,11 @@ function commit(o, cli = runCli) {
       note: 'Signale gehen in den vorhandenen Open-Second-Brain-Inbox-/Freigabeprozess. Keine bestätigte dauerhafte Präferenz behauptet.' };
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 }
+/**
+ * Dispatch the explicitly requested preview or hash-confirmed commit workflow.
+ * @param argv - CLI option tokens.
+ * @returns Promise for the workflow result.
+ */
 async function main(argv = process.argv.slice(2)) {
   const o = argsParse(argv);
   return o.commit ? commit(o) : await preview(o);

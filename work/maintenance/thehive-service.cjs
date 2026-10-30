@@ -9,9 +9,28 @@ const LOCK = path.join(DIR, 'service.lock.json');
 const STATE = path.join(DIR, 'service-state.json');
 const STOP = path.join(DIR, 'service-stop.json');
 const mode = process.argv[2] || '--status';
+/**
+ * Capture the current UTC time for persisted maintenance evidence.
+ * @returns ISO 8601 timestamp.
+ */
 const now = () => new Date().toISOString();
+/**
+ * Parse persisted supervisor JSON, accepting a leading UTF-8 BOM.
+ * @param file - Existing JSON path.
+ * @returns Parsed state; malformed content is not silently reset.
+ */
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+/**
+ * Probe PID liveness conservatively: only ESRCH establishes that the owner is dead.
+ * @param pid - Recorded process identifier.
+ * @returns Whether the process may still be alive.
+ */
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; } };
+/**
+ * Replace a supervisor JSON file using a temporary file and bounded rename retries.
+ * @param file - State, stop-request or lock destination.
+ * @param value - JSON-serializable record.
+ */
 function atomic(file, value) {
   const temp = file + '.' + process.pid + '.tmp';
   fs.writeFileSync(temp, JSON.stringify(value, null, 2) + '\n');
@@ -23,11 +42,19 @@ function atomic(file, value) {
     }
   }
 }
+/**
+ * Read the current maintenance lock and conservatively annotate owner liveness.
+ * @returns Owner record with alive flag, or null if the lock is absent.
+ */
 function existing() {
   if (!fs.existsSync(LOCK)) return null;
   const owner = read(LOCK);
   return { ...owner, alive: Number.isInteger(owner.pid) && alive(owner.pid) };
 }
+/**
+ * Load persisted stage outcomes without carrying old process ownership into this run.
+ * @returns Original saved state and validated stages; malformed evidence causes an error.
+ */
 function previousState() {
   try {
     const stored = fs.existsSync(STATE) ? read(STATE) : undefined;
@@ -69,6 +96,9 @@ if (fs.existsSync(STOP)) fs.unlinkSync(STOP);
 let stopping = false;
 const state = { pid: process.pid, started_at: now(), mode, status: 'starting', stages: previousStages, cycles: 0,
   policy: { new_models: false, downloads: false, cloud_calls: false, qmd_embedding: 'existing-local-Qwen; packaged CUDA with sufficient free VRAM, otherwise CPU', synthetic_feedback: false } };
+/**
+ * Persist the current in-memory supervisor state to the existing state path.
+ */
 const save = () => atomic(STATE, state);
 const powershell = path.join(process.env.SystemRoot || 'C:/Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe');
 const stages = [
@@ -80,6 +110,11 @@ const stages = [
   { name: 'graph', exe: python, args: [path.join(DIR, 'sync-text-graph.py'), '--html'], timeout: 120000 },
   { name: 'semantic', exe: process.execPath, args: [path.join(DIR, 'semantic-sync.cjs')], timeout: 300000 },
 ];
+/**
+ * Run one configured maintenance child with bounded output and timeout handling.
+ * @param stage - Executable, arguments, timeout, environment and stage name.
+ * @returns Promise for exit details, parsed result and bounded diagnostic tails.
+ */
 function run(stage) {
   return new Promise(resolve => {
     const started = now();
@@ -101,6 +136,11 @@ function run(stage) {
     child.stderr.on('data', value => { stderr = (stderr + value).slice(-32768); });
     child.on('error', e => { error = e.message; });
     const hardTimer = setTimeout(() => finish(1, 'unconfirmed-child-close'), stage.timeout + 10000);
+    /**
+     * Finalize a child once and convert failed or oversized stage results into failures.
+     * @param exit_code - Observed process exit code.
+     * @param signal - Terminating signal or hard-timeout marker.
+     */
     function finish(exit_code, signal) {
       if (settled) return;
       settled = true; clearTimeout(timer); clearTimeout(hardTimer);
@@ -121,6 +161,10 @@ function run(stage) {
     if (stage.name === 'native') child.on('exit', finish);
   });
 }
+/**
+ * Run due stages in order, persist each outcome and retain capped failure backoff.
+ * @returns Promise after the overall degraded/catching-up/watching status is saved.
+ */
 async function cycle() {
   state.status = 'syncing'; state.cycles++; save();
   for (const stage of stages) {
@@ -143,6 +187,9 @@ async function cycle() {
     : state.stages.semantic?.result?.state === 'partial' ? 'catching_up' : 'watching';
   state.last_cycle_at = now(); save();
 }
+/**
+ * Remove the supervisor lock only while it still records this process as owner.
+ */
 function release() {
   if (fs.existsSync(LOCK) && read(LOCK).pid === process.pid) fs.unlinkSync(LOCK);
 }

@@ -5,6 +5,7 @@ const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');
 const {spawnSync}=require('node:child_process');
+/** Replace exactly one fixture target; reject template drift before any adapter can execute. */
 function replaceOnce(source, from, to) {
   assert.ok(source.includes(from),'fixture replacement target missing: '+from);
   assert.equal(source.indexOf(from),source.lastIndexOf(from),'fixture replacement target ambiguous: '+from);

@@ -127,6 +127,11 @@ test('explicit report output directory works and duplicate output flags are refu
 });
 test('review schema and evidence validation agree on minimum quote length',()=>{
   const candidate=[{topic:'quote-test',original:'abcdefghijk',situational:false}];
+  /**
+   * Build one synthetic durable verdict to test quote-length validation.
+   * @param quote - Candidate verbatim evidence quote.
+   * @returns Reviewer-shaped items response.
+   */
   const judgment=quote=>({items:[{topic:'quote-test',verdict:'durable',quote,reason:'Direct instruction',confidence:0.95}]});
   assert.throws(()=>q.validateJudgments(candidate,judgment('abcdefg')),/Zitat/);
   assert.equal(q.validateJudgments(candidate,judgment('abcdefgh')).length,1);

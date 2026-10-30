@@ -11,14 +11,38 @@ const FOLDERS = {
   '10_Projekte': 'Projektindex', '20_Wissen': 'Wissensindex',
   '30_Entscheidungen': 'Entscheidungsindex', '40_Fehler-Loesungen': 'Fehlerindex',
 };
+/**
+ * Hash source bytes or text for content and write-request identity.
+ * @param data - UTF-8 text or raw bytes.
+ * @returns SHA-256 hex digest.
+ */
 const sha = (data: string | Buffer) => crypto.createHash('sha256').update(data).digest('hex');
+/**
+ * Normalize a note path for case-insensitive, extension-free target matching.
+ * @param p - Relative link or note path.
+ * @returns Unicode-normalized lookup key.
+ */
 const noteKey = (p: string) => p.replace(/\\/g, '/').replace(/\.md$/i, '').normalize('NFC').toLowerCase();
+/**
+ * Remove wikilink delimiters and line breaks from a display label.
+ * @param s - Untrusted title or path.
+ * @returns Trimmed single-line label.
+ */
 const label = (s: string) => s.replace(/[\[\]|\r\n]/g, ' ').trim();
 const MARKER = '<!-- thehive-navigation:v1 -->';
 const VAULT_INDEX = '20_Wissen/Vaultindex.md';
 
+/**
+ * List visible regular Markdown files without following linked or hidden trees.
+ * @param vault - Absolute vault root.
+ * @returns Sorted paths and excluded link/administration entries.
+ */
 function inventory(vault: string) {
   const paths: string[] = []; const excluded: { path: string; reason: string }[] = [];
+  /**
+   * Accumulate inventory paths and exclusion reasons below a directory.
+   * @param dir - Directory within the vault.
+   */
   function walk(dir: string) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const abs = path.join(dir, entry.name);
@@ -36,6 +60,11 @@ function inventory(vault: string) {
   return { paths: paths.sort(), excluded };
 }
 
+/**
+ * Choose the structural section of the vault index from a relative path.
+ * @param rel - Vault-relative note path.
+ * @returns Section label; no semantic classification is performed.
+ */
 function category(rel: string) {
   if (rel.startsWith('00_System/')) return 'Systemregeln – Originale nur lesen';
   if (rel.startsWith('Brain/')) return 'Brain – Originalstatus und Herkunft gelten weiter';
@@ -47,14 +76,33 @@ function category(rel: string) {
   return 'Weitere Vaultnotizen';
 }
 
+/**
+ * Render a note list entry, using encoded Markdown for unsafe wikilink names.
+ * @param rel - Vault-relative Markdown path.
+ * @returns One list entry with a safe display label.
+ */
 function pathLink(rel: string) {
+  /**
+   * Percent-encode one URL path segment, including Markdown-sensitive punctuation.
+   * @param part - Single path segment.
+   * @returns Encoded segment.
+   */
   const encode = (part: string) => encodeURIComponent(part).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
   if (/[\[\]|#^]/.test(rel)) return `- [${label(rel)}](${rel.split('/').map(encode).join('/')})`;
   return `- [[${rel.replace(/\.md$/i, '')}|${label(rel)}]]`;
 }
 
+/**
+ * Load the installed OSB parsing, repair, write and locking APIs.
+ * @returns Merged module exports; importing does not itself write notes.
+ */
 async function library() {
   const base = path.join(os.homedir(), 'projects/open-second-brain/src/core');
+  /**
+   * Import one OSB core module through its absolute file URL.
+   * @param rel - Path relative to the installed core directory.
+   * @returns Module import promise.
+   */
   const get = (rel: string) => import(pathToFileURL(path.join(base, rel)).href);
   const [vault, repair, writes, links, locks] = await Promise.all([
     get('vault.ts'), get('brain/link-graph/repair-lane.ts'),
@@ -63,18 +111,33 @@ async function library() {
   return { ...vault, ...repair, ...writes, ...links, ...locks };
 }
 
+/**
+ * Inspect a path and reject symbolic links or multiply linked files.
+ * @param p - Existing source or directory path.
+ * @returns Filesystem metadata; throws for refused links.
+ */
 function regular(p: string) {
   const stat = fs.lstatSync(p);
   if (stat.isSymbolicLink() || stat.nlink > 1 && stat.isFile()) throw Error('Link/reparse source refused: ' + p);
   return stat;
 }
 
+/**
+ * Read eligible Fach folders and retain source hashes, metadata and parse warnings.
+ * @param vault - Absolute vault root.
+ * @param lib - OSB frontmatter parser API.
+ * @returns Map of note records; rejects unsafe paths, encodings and oversized files.
+ */
 function scan(vault: string, lib: any) {
   // Verify ancestors as well as directory entries; never follow junctions.
   for (let cursor = vault; ; cursor = path.dirname(cursor)) {
     regular(cursor); if (path.dirname(cursor) === cursor) break;
   }
   const notes = new Map<string, any>();
+  /**
+   * Recursively parse Fach notes after checking each directory and entry for links.
+   * @param dir - Fach directory under the vault.
+   */
   function walk(dir: string) {
     regular(dir);
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -99,6 +162,14 @@ function scan(vault: string, lib: any) {
   return notes;
 }
 
+/**
+ * Resolve explicit note links only when one known target matches.
+ * @param body - Source note body.
+ * @param source - Vault-relative source path.
+ * @param notes - Candidate note map.
+ * @param lib - OSB link extraction API.
+ * @returns Set of unambiguous vault-relative targets.
+ */
 function targets(body: string, source: string, notes: Map<string, any>, lib: any) {
   const found = new Set<string>();
   for (const link of lib.extractLinks(body)) {
@@ -117,6 +188,11 @@ function targets(body: string, source: string, notes: Map<string, any>, lib: any
   return found;
 }
 
+/**
+ * Plan missing navigation and optionally apply audited, read-back-verified OSB writes.
+ * @param options - Vault, preview, writer and reconciliation hooks.
+ * @returns Coverage, blocked notes and planned or accepted writes; no model calls.
+ */
 async function synchronize(options: any = {}) {
   const vault = path.resolve(options.vault ?? ROOT);
   const lib = await library(); const notes = scan(vault, lib);
@@ -132,6 +208,11 @@ async function synchronize(options: any = {}) {
   }
   const blocked = eligible.filter(n => n.lossy).map(n => ({ path: n.rel, reason: 'frontmatter cannot round-trip; original preserved' }));
   const contents = new Map<string, string[]>();
+  /**
+   * Append a unique navigation line to the pending content for one note.
+   * @param rel - Vault-relative destination.
+   * @param value - Navigation line to add.
+   */
   const add = (rel: string, value: string) => { const list = contents.get(rel) ?? []; if (!list.includes(value)) list.push(value); contents.set(rel, list); };
   for (const index of indices) {
     const note = notes.get(index.rel);
@@ -189,6 +270,13 @@ async function synchronize(options: any = {}) {
   if (options.preview) return { status: 'preview_only', operations, coverage, blocked, explicit_references: dry.written, models_invoked: false };
   const expected = new Map([...notes].map(([rel, n]) => [rel, n.hash]));
   const runId = crypto.randomUUID(); // A new scan after an audited revert is a new logical request.
+  /**
+   * Apply one OSB operation under the navigation identity and restore the environment.
+   * @param _vault - Unused writer-interface vault argument.
+   * @param op - Planned note operation.
+   * @param requestId - Audited idempotency key.
+   * @returns OSB batch result.
+   */
   const writer = options.writer ?? (async (_vault: string, op: any, requestId: string) => {
     const previousAgent = process.env.VAULT_AGENT_NAME;
     try {
@@ -235,6 +323,11 @@ async function synchronize(options: any = {}) {
   return { status: blocked.length || newPaths.length ? 'partial' : written.length ? 'updated' : 'unchanged', written, coverage: finalCoverage, blocked, explicit_references: dry.written, models_invoked: false };
 }
 
+/**
+ * Preview navigation or serialize a write pass using the existing OSB lock.
+ * @param options - Vault override, preview flag and optional writer/test hooks.
+ * @returns Synchronization result; releases the acquired lock even on failure.
+ */
 export async function syncNavigation(options: any = {}) {
   if (options.preview) return synchronize(options);
   const vault = path.resolve(options.vault ?? ROOT);

@@ -28,6 +28,12 @@ const expected = {
   'avoid-testing-yourself': 'reject'
 };
 
+/**
+ * Classify a proposal against the narrow historical reference heuristics.
+ * @param item - Proposal containing the principle text.
+ * @param original - Original source-turn text, if available.
+ * @returns Advisory decision/reason; no model call or memory acceptance.
+ */
 function assess(item, original) {
   if (typeof original !== 'string' || !original.trim()) {
     return {
