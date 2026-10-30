@@ -185,7 +185,19 @@ function main() {
     // and cannot cause a still-running Dream process to overlap a new one.
     console.log(JSON.stringify({ status: 'locked', lock: LOCK })); process.exitCode = 1; return;
   }
-  fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, host: os.hostname(), token: crypto.randomUUID(), started_at: new Date().toISOString() }));
+  let owned;
+  try {
+    owned = fs.fstatSync(fd);
+    fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, host: os.hostname(), token: crypto.randomUUID(), started_at: new Date().toISOString() }));
+    fs.fsyncSync(fd);
+  } catch (error) {
+    try { fs.closeSync(fd); } catch (cleanup) { error.lockCleanupError = cleanup; }
+    try {
+      const current = fs.statSync(LOCK);
+      if (owned && current.dev === owned.dev && current.ino === owned.ino) fs.unlinkSync(LOCK);
+    } catch (cleanup) { if (cleanup.code !== 'ENOENT') error.lockCleanupError = cleanup; }
+    throw error;
+  }
   const started = new Date().toISOString();
   let state, key, report, status = { started_at: started, reason, collection: COLLECTION, expected_actions: null, applied_actions: null };
   try {

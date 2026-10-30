@@ -5,6 +5,43 @@ const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');
 const {spawnSync}=require('node:child_process');
+function replaceOnce(source, from, to) {
+  assert.ok(source.includes(from),'fixture replacement target missing: '+from);
+  assert.equal(source.indexOf(from),source.lastIndexOf(from),'fixture replacement target ambiguous: '+from);
+  return source.replace(from,to);
+}
+test('fixture substitutions reject missing or repeated targets before adapter execution',()=>{
+  assert.throws(()=>replaceOnce('changed template','ROOT','safe'),/missing/);
+  assert.throws(()=>replaceOnce('ROOT ROOT','ROOT','safe'),/ambiguous/);
+  assert.equal(replaceOnce('ROOT','ROOT','safe'),'safe');
+});
+test('learning lock write failure closes its handle and removes only its own file',t=>{
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'hive-learning-write-'));
+  t.after(()=>fs.rmSync(base,{recursive:true,force:true}));
+  const source=fs.readFileSync(path.join(__dirname,'learning-sync.cjs'),'utf8');
+  for(const failure of ['write','fsync','foreign']){
+    const root=path.join(base,failure),lock=path.join(root,'work/maintenance/learning/run.lock');
+    const injected=`
+let ownFd,closed=false;
+const originalOpen=fs.openSync, originalWrite=fs.writeFileSync, originalClose=fs.closeSync, originalFsync=fs.fsyncSync;
+fs.openSync=function(file,...args){const fd=originalOpen.call(fs,file,...args);if(file===LOCK)ownFd=fd;return fd;};
+fs.closeSync=function(fd){const isOwn=fd===ownFd;if(isOwn)closed=true;const result=originalClose.call(fs,fd);if(isOwn && ${JSON.stringify(failure)}==='foreign'){fs.renameSync(LOCK,LOCK+'.owned');originalWrite.call(fs,LOCK,'foreign');}return result;};
+fs.writeFileSync=function(file,...args){if(file===ownFd && ${JSON.stringify(failure)}!=='fsync')throw new Error('fixture-write-error');return originalWrite.call(fs,file,...args);};
+fs.fsyncSync=function(fd){if(fd===ownFd && ${JSON.stringify(failure)}==='fsync')throw new Error('fixture-write-error');return originalFsync.call(fs,fd);};
+process.on('uncaughtException',error=>{
+ console.log(JSON.stringify({error:error.message,closed}));process.exitCode=1;
+});
+function main() {`;
+    let rewritten=replaceOnce(source,"const ROOT = 'C:\\\\TheHive';",'const ROOT = '+JSON.stringify(root)+';');
+    rewritten=replaceOnce(rewritten,'function main() {',injected);
+    const adapter=path.join(base,failure+'.cjs');fs.writeFileSync(adapter,rewritten);
+    const result=spawnSync(process.execPath,[adapter],{encoding:'utf8',timeout:10000});
+    assert.equal(result.status,1,result.stderr);const output=JSON.parse(result.stdout);
+    assert.equal(output.error,'fixture-write-error');assert.equal(output.closed,true);
+    if(failure==='foreign')assert.equal(fs.readFileSync(lock,'utf8'),'foreign');
+    else assert.equal(fs.existsSync(lock),false);
+  }
+});
 test('explicit learning recovery archives a dead lock and preserves apply evidence without running Dream',t=>{
   const base=fs.mkdtempSync(path.join(os.tmpdir(),'hive-learning-recovery-'));
   t.after(()=>fs.rmSync(base,{recursive:true,force:true}));
@@ -28,9 +65,8 @@ mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
 mod.processes=lambda:[{'pid':os.getpid(),'ppid':os.getppid(),'potential':False,'unknown':False}]
 print(json.dumps(mod.recover(pathlib.Path(sys.argv[1]))))
 `);
-  const rewritten=source.replace("const ROOT = 'C:\\\\TheHive';",'const ROOT = '+JSON.stringify(base)+';')
-    .replace("path.join(__dirname, 'learning-lock-recovery.py')",JSON.stringify(helper));
-  assert.notEqual(source,rewritten);
+  const relocated=replaceOnce(source,"const ROOT = 'C:\\\\TheHive';",'const ROOT = '+JSON.stringify(base)+';');
+  const rewritten=replaceOnce(relocated,"path.join(__dirname, 'learning-lock-recovery.py')",JSON.stringify(helper));
   const adapter=path.join(base,'learning-fixture.cjs');fs.writeFileSync(adapter,rewritten);
   const run=(...args)=>spawnSync(process.execPath,[adapter,...args],{encoding:'utf8',timeout:30000});
   const normal=run('--force');assert.equal(normal.status,1);assert.equal(JSON.parse(normal.stdout).status,'locked');
@@ -48,7 +84,7 @@ print(json.dumps(mod.recover(pathlib.Path(sys.argv[1]))))
   assert.equal(JSON.parse(automatic.stdout).status,'recovery_requires_force');
   assert.equal(fs.readFileSync(path.join(dir,'status.json'),'utf8'),status);
   // A forced fixture reaches input preparation; stop before any Dream engine.
-  fs.writeFileSync(adapter,rewritten.replace('state = inputState();',"throw new Error('FIXTURE_STOP_BEFORE_DREAM');"));
+  fs.writeFileSync(adapter,replaceOnce(rewritten,'state = inputState();',"throw new Error('FIXTURE_STOP_BEFORE_DREAM');"));
   const forced=run('--force');assert.equal(forced.status,1);
   assert.match(JSON.parse(forced.stdout).error,/FIXTURE_STOP_BEFORE_DREAM/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'lock-recovery.json'))).requires_force,true);
@@ -60,8 +96,8 @@ test('automatic startup rechecks the force barrier after acquiring its lock',t=>
   const base=fs.mkdtempSync(path.join(os.tmpdir(),'hive-learning-barrier-'));
   t.after(()=>fs.rmSync(base,{recursive:true,force:true}));
   const source=fs.readFileSync(path.join(__dirname,'learning-sync.cjs'),'utf8');
-  const rewritten=source.replace("const ROOT = 'C:\\\\TheHive';",'const ROOT = '+JSON.stringify(base)+';')
-    .replace('function main() {',`
+  const relocated=replaceOnce(source,"const ROOT = 'C:\\\\TheHive';",'const ROOT = '+JSON.stringify(base)+';');
+  const rewritten=replaceOnce(relocated,'function main() {',`
 const originalOpen=fs.openSync;
 fs.openSync=function(file,...rest){
   if(file===LOCK)fs.writeFileSync(RECOVERY,JSON.stringify({requires_force:true}));
