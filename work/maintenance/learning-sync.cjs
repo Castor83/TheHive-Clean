@@ -5,6 +5,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 const ROOT = 'C:\\TheHive';
 const BRAIN = path.join(ROOT, 'Brain');
@@ -16,6 +17,7 @@ const DIR = path.join(ROOT, 'work', 'maintenance', 'learning');
 const STATUS = path.join(DIR, 'status.json');
 const LAST = path.join(DIR, 'last-input.json');
 const LOCK = path.join(DIR, 'run.lock');
+const RECOVERY = path.join(DIR, 'lock-recovery.json');
 const AGENT = 'codex-desktop-agent';
 const COLLECTION = {
   mode: 'existing-real-inbox-and-apply-evidence',
@@ -25,7 +27,7 @@ const COLLECTION = {
   scope: 'Preferences are inferred only by the existing evidence thresholds; ordinary project facts remain in their own notes.'
 };
 const args = process.argv.slice(2);
-const supported = new Set(['--force', '--preview-only', '--status', '--reason']);
+const supported = new Set(['--force', '--preview-only', '--status', '--reason', '--recover-stale-lock']);
 let reason = 'event';
 for (let i = 0; i < args.length; i++) {
   if (!supported.has(args[i])) throw new Error(`Unknown argument: ${args[i]}`);
@@ -158,6 +160,23 @@ function verifyChanges(before, after, expected) {
 function main() {
   if (args.includes('--status')) { console.log(JSON.stringify(readJson(STATUS, { status: 'not_initialized', collection: COLLECTION }))); return; }
   fs.mkdirSync(DIR, { recursive: true });
+  if (args.includes('--recover-stale-lock')) {
+    const result = spawnSync('python', [path.join(__dirname, 'learning-lock-recovery.py'), DIR],
+      { windowsHide: true, encoding: 'utf8', timeout: 20000, maxBuffer: 16384 });
+    let recovery;
+    try { recovery = JSON.parse(result.stdout || '{}'); } catch { /* fail closed below */ }
+    if (result.error || result.status !== 0 || !['recovered', 'not_locked'].includes(recovery?.status)) {
+      console.log(JSON.stringify({ status: 'locked', lock: LOCK, reason: recovery?.reason ?? 'recovery_unavailable' }));
+      process.exitCode = 1; return;
+    }
+    if (!args.includes('--force')) {
+      console.log(JSON.stringify({ ...recovery, dream_started: false })); return;
+    }
+  }
+  if (readJson(RECOVERY)?.requires_force && !args.includes('--force')) {
+    console.log(JSON.stringify({ status: 'recovery_requires_force', recovery_path: RECOVERY, dream_started: false }));
+    process.exitCode = 1; return;
+  }
   let fd;
   try { fd = fs.openSync(LOCK, 'wx'); }
   catch (e) {
@@ -166,10 +185,17 @@ function main() {
     // and cannot cause a still-running Dream process to overlap a new one.
     console.log(JSON.stringify({ status: 'locked', lock: LOCK })); process.exitCode = 1; return;
   }
-  fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }));
+  fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, host: os.hostname(), token: crypto.randomUUID(), started_at: new Date().toISOString() }));
   const started = new Date().toISOString();
   let state, key, report, status = { started_at: started, reason, collection: COLLECTION, expected_actions: null, applied_actions: null };
   try {
+    // Recheck after acquiring run.lock: another process may have completed a
+    // recovery between our initial barrier check and this exclusive open.
+    if (readJson(RECOVERY)?.requires_force && !args.includes('--force')) {
+      process.exitCode = 1;
+      console.log(JSON.stringify({ status: 'recovery_requires_force', recovery_path: RECOVERY, dream_started: false }));
+      return;
+    }
     const previous = readJson(STATUS);
     if (previous?.status === 'apply_failed_or_unverified' && !args.includes('--force')) {
       process.exitCode = 1;
@@ -224,6 +250,9 @@ function main() {
       throw new Error('Engine/runtime/adapter changed during processing');
     }
     if (status.status !== 'preview_only') writeJson(LAST, { key: digest({ day, state: finalState }), at: new Date().toISOString(), status: status.status });
+    if (args.includes('--force') && status.status !== 'preview_only' && readJson(RECOVERY)?.requires_force) {
+      writeJson(RECOVERY, { ...readJson(RECOVERY), requires_force: false, completed_at: new Date().toISOString(), report_dir: report });
+    }
   } catch (error) {
     status.status = status.live_pass_started ? 'apply_failed_or_unverified' : 'deferred';
     status.error = error.message;

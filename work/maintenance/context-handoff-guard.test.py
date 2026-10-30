@@ -16,6 +16,54 @@ SNAPSHOT_SOURCE = HERE / "fixtures/pre-compaction-snapshot.py"
 
 
 class ContextGuardTests(unittest.TestCase):
+    def test_capture_lock_creation_errors_remove_only_own_file(self):
+        self.checkpoint()
+        self.usage(800)
+        parent = self.home / 'handoff-snapshots' / self.session
+        lock = parent / 'context.lock'
+        original_open = Path.open
+        helpers = self.guard._helpers(self.home)
+        for failure in ('write', 'flush', 'fsync', 'foreign_replacement'):
+            class FailingHandle:
+                def __init__(inner, stream):
+                    inner.stream = stream
+                def __enter__(inner):
+                    return inner
+                def __exit__(inner, *exc):
+                    inner.stream.close()
+                    if failure == 'foreign_replacement':
+                        lock.rename(parent / 'original-lock-retained')
+                        lock.write_text('foreign owner', encoding='ascii')
+                def fileno(inner):
+                    return inner.stream.fileno()
+                def write(inner, value):
+                    if failure in ('write', 'foreign_replacement'):
+                        inner.stream.write(value[:5])
+                        raise OSError('fixture write failure')
+                    return inner.stream.write(value)
+                def flush(inner):
+                    if failure == 'flush':
+                        raise OSError('fixture flush failure')
+                    return inner.stream.flush()
+            def open_file(target, *args, **kwargs):
+                stream = original_open(target, *args, **kwargs)
+                mode = args[0] if args else kwargs.get('mode', 'r')
+                return FailingHandle(stream) if target == lock and mode == 'x' else stream
+            real_fsync = os.fsync
+            def fsync(fd):
+                if failure == 'fsync':
+                    raise OSError('fixture fsync failure')
+                return real_fsync(fd)
+            with self.subTest(failure=failure), mock.patch.object(Path, 'open', open_file), \
+                 mock.patch.object(self.guard.os, 'fsync', fsync):
+                with self.assertRaisesRegex(OSError, 'fixture'):
+                    self.guard._capture(self.event, self.home, self.store, self.transcript, {}, helpers)
+            if failure == 'foreign_replacement':
+                self.assertEqual(lock.read_text(encoding='ascii'), 'foreign owner')
+                lock.unlink()
+            else:
+                self.assertFalse(lock.exists())
+
     def test_retained_capture_lock_has_actionable_diagnostic_without_removal(self):
         self.checkpoint()
         self.usage(800)

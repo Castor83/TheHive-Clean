@@ -273,10 +273,7 @@ def _capture(event, home, root, transcript, usage, helpers, manual_save=False):
     nonce = uuid.uuid4().hex
     lock_content = json.dumps(dict(pid=os.getpid(), created_at_utc=datetime.now(timezone.utc).isoformat(), nonce=nonce))
     try:
-        with lock.open('x', encoding='ascii') as handle:
-            handle.write(lock_content)
-            handle.flush()
-            os.fsync(handle.fileno())
+        handle = lock.open('x', encoding='ascii')
     except FileExistsError:
         error = ValueError('capture_lock_retained: Sperrdatei ' + str(lock)
                            + ' bleibt erhalten. Besitzer/PID und laufende Sicherungen manuell pruefen; '
@@ -284,6 +281,23 @@ def _capture(event, home, root, transcript, usage, helpers, manual_save=False):
                            'Alter allein belegt keinen beendeten Prozess.')
         error.save_error_code = 'capture_lock_retained'
         raise error
+    owned = None
+    try:
+        with handle:
+            owned = os.fstat(handle.fileno())
+            handle.write(lock_content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        # The stream is closed before unlinking (required on Windows). Compare
+        # file identity, since partial writes may not contain our nonce yet.
+        try:
+            current = lock.stat()
+            if owned and (current.st_dev, current.st_ino) == (owned.st_dev, owned.st_ino):
+                lock.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     attempt = None
     attempt_file = parent / 'context-last-attempt.json'
     try:

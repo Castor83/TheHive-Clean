@@ -35,3 +35,9 @@ Zusaetzlich sind die vorher im Export fehlende handoff-naming.cjs-Abhaengigkeit 
 ### Wiederherstellung einer verwaisten Erwerbssperre
 
 Bei nachgewiesen beendetem lokalem Besitzer kann der Store `.lock-gate` jetzt wiederherstellen. `handoff-gate-recovery.py` serialisiert die Wiederherstellung mit der vorhandenen Betriebssystemsperre aus `sync-text-graph.py`; es startet dabei keine Graphwartung und benoetigt kein Graphify. Die Sperre wird bei Prozessende automatisch freigegeben. Alte Gatebytes bleiben als `.lock-gate.stale-*` erhalten. Lebende, fremde oder unklare Besitzer bleiben unangetastet. Nur dieser Wiederherstellungspfad benoetigt ein bereits installiertes Python 3 unter dem Befehl `python`; bei fehlendem Python wird nichts entfernt und eine konkrete Fehlermeldung ausgegeben.
+
+### Explizite Wiederherstellung der Learning-Sperre
+
+`learning-sync.cjs --recover-stale-lock` prueft unter Windows die gespeicherte PID, den CIM-Prozessbestand und moegliche verbliebene Dream-/Archivierungsworker. Bei lebendem oder unklarem Besitzer bleibt die Sperre bestehen. Nur eindeutig verwaiste Sperren werden archiviert; status.json wird zusaetzlich bytegleich gesichert, Berichte und Backups bleiben erhalten. Eine Wiederaufnahme bleibt danach bis zu einem ausdruecklichen `--force` gesperrt. `--recover-stale-lock --force` verbindet Wiederherstellung und den ausdruecklich erzwungenen Lauf. Die Wiederherstellung allein startet kein Dream. Sie benoetigt vorhandenes Python3, Windows PowerShell/CIM und die mitgelieferten Gate-/Graph-Lockhelfer; fehlende Pruefvoraussetzungen erhalten die Sperre.
+
+Die Kontextwaechter-Sperre wird bei Fehlern aus write/flush/fsync jetzt anhand ihrer Dateikennung bereinigt; eine fremde Ersatzdatei bleibt erhalten. Neue Regressionen verwenden ausschliesslich isolierte Fixtures und stoppen vor produktiver Lernverarbeitung.
