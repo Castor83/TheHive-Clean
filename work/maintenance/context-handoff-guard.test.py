@@ -1,0 +1,691 @@
+"""New offline fixtures only; never trigger a native compaction or model."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+import uuid
+
+HERE = Path(__file__).parent
+SNAPSHOT_SOURCE = HERE / "fixtures/pre-compaction-snapshot.py"
+
+
+class ContextGuardTests(unittest.TestCase):
+    def test_capture_lock_creation_errors_remove_only_own_file(self):
+        """Verify failed lock creation removes only the file owned by that capture."""
+        self.checkpoint()
+        self.usage(800)
+        parent = self.home / 'handoff-snapshots' / self.session
+        lock = parent / 'context.lock'
+        original_open = Path.open
+        helpers = self.guard._helpers(self.home)
+        for failure in ('write', 'flush', 'fsync', 'foreign_replacement'):
+            class FailingHandle:
+                def __init__(inner, stream):
+                    """Wrap a real lock stream for controlled write, flush and replacement failures."""
+                    inner.stream = stream
+                def __enter__(inner):
+                    """Return the wrapped failure-injection context manager."""
+                    return inner
+                def __exit__(inner, *exc):
+                    """Close the stream and optionally replace the lock with a foreign-owner file."""
+                    inner.stream.close()
+                    if failure == 'foreign_replacement':
+                        lock.rename(parent / 'original-lock-retained')
+                        lock.write_text('foreign owner', encoding='ascii')
+                def fileno(inner):
+                    """Return the underlying stream descriptor for real identity and fsync checks."""
+                    return inner.stream.fileno()
+                def write(inner, value):
+                    """Write normally or inject a partial-write failure for the selected scenario."""
+                    if failure in ('write', 'foreign_replacement'):
+                        inner.stream.write(value[:5])
+                        raise OSError('fixture write failure')
+                    return inner.stream.write(value)
+                def flush(inner):
+                    """Flush the underlying stream unless this scenario injects a flush error."""
+                    if failure == 'flush':
+                        raise OSError('fixture flush failure')
+                    return inner.stream.flush()
+            def open_file(target, *args, **kwargs):
+                """Wrap only exclusive capture-lock opens, preserving other file operations."""
+                stream = original_open(target, *args, **kwargs)
+                mode = args[0] if args else kwargs.get('mode', 'r')
+                return FailingHandle(stream) if target == lock and mode == 'x' else stream
+            real_fsync = os.fsync
+            def fsync(fd):
+                """Inject the selected fsync failure or delegate to the real disk flush."""
+                if failure == 'fsync':
+                    raise OSError('fixture fsync failure')
+                return real_fsync(fd)
+            with self.subTest(failure=failure), mock.patch.object(Path, 'open', open_file), \
+                 mock.patch.object(self.guard.os, 'fsync', fsync):
+                with self.assertRaisesRegex(OSError, 'fixture'):
+                    self.guard._capture(self.event, self.home, self.store, self.transcript, {}, helpers)
+            if failure == 'foreign_replacement':
+                self.assertEqual(lock.read_text(encoding='ascii'), 'foreign owner')
+                lock.unlink()
+            else:
+                self.assertFalse(lock.exists())
+
+    def test_retained_capture_lock_has_actionable_diagnostic_without_removal(self):
+        """Verify a pre-existing capture lock is retained and explained with its path."""
+        self.checkpoint()
+        self.usage(800)
+        parent = self.home / 'handoff-snapshots' / self.session
+        parent.mkdir(parents=True)
+        lock = parent / 'context.lock'
+        for content in ('legacy-nonce', json.dumps({'pid': os.getpid(), 'created_at_utc': '2026-10-30'})):
+            lock.write_text(content, encoding='ascii')
+            with self.subTest(content=content):
+                result = self.handle()
+                self.assertIn('capture_lock_retained', result['systemMessage'])
+                self.assertIn(str(lock), result['systemMessage'])
+                self.assertIn('manuell', result['systemMessage'])
+                self.assertEqual(lock.read_text(encoding='ascii'), content)
+
+    def test_python_node_boundary_preserves_waiting_status_and_failure_reason(self):
+        """Verify mocked adapter results preserve waiting status and allowed failure reasons."""
+        spec = importlib.util.spec_from_file_location('precompact_boundary', SNAPSHOT_SOURCE)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        self.store.mkdir(parents=True)
+        directory = self.home / 'handoff-snapshots' / self.session / 'fixture'
+        directory.mkdir(parents=True)
+        event = {**self.event, 'turn_id': str(uuid.uuid4())}
+        manifest = dict(status='PASS', session_id=self.session, cwd=str(self.cwd), snapshot_path=str(directory),
+                        working_state={'source': str(self.store / 'working.md')})
+        for expected in ({'status': 'waiting_for_origin', 'successor_thread_id': None},
+                         {'status': 'fallback_required', 'successor_thread_id': None, 'reason_code': 'navigation_failed'}):
+            completed = subprocess.CompletedProcess([], 0, stdout=json.dumps(expected), stderr='')
+            with self.subTest(expected=expected), mock.patch.object(helper, '_verified', return_value=True), \
+                 mock.patch.object(helper, '_desktop_process', return_value=completed):
+                actual = helper._desktop_successor(event, manifest, handoff_root=self.store, codex_home=self.home)
+            self.assertEqual(actual, expected)
+
+    def test_precompact_waiting_notice_matches_deferred_visible_switch(self):
+        """Verify pending origin completion produces a waiting notice and stop response."""
+        spec = importlib.util.spec_from_file_location('precompact_notice', SNAPSHOT_SOURCE)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        with mock.patch.object(helper, 'capture_snapshot', return_value={'status': 'PASS', 'snapshot_path': str(self.root)}), \
+             mock.patch.object(helper, '_desktop_successor', return_value={'status': 'waiting_for_origin'}):
+            result = helper.handle_event({})
+        self.assertIn('Weiterleitung läuft', result['systemMessage'])
+        self.assertNotIn('wurde geöffnet', result['systemMessage'])
+        self.assertIs(result['continue'], False)
+
+    def test_visible_handoff_requests_final_user_message_and_no_more_work(self):
+        """Verify hook feedback requests the final visible message and ends project work."""
+        from types import SimpleNamespace
+        self.usage(800)
+        real_helpers = self.guard._helpers(self.home)
+        self.store.mkdir(parents=True)
+        helpers = SimpleNamespace(_local=lambda _: True, _atomic_json=lambda *a: None,
+                                  _transition_message=real_helpers._transition_message,
+                                  _desktop_successor=lambda *a, **kw: {'status': 'waiting_for_origin'})
+        usage = dict(used_tokens=800, model_context_window=1000, limit_tokens=1000, threshold_percent=80)
+        with mock.patch.object(self.guard, '_helpers', return_value=helpers), \
+             mock.patch.object(self.guard, '_usage', return_value=(self.transcript, usage)), \
+             mock.patch.object(self.guard, '_capture', return_value={'snapshot_path': str(self.root), 'status': 'PASS'}):
+            result = self.handle()
+        self.assertIn('Weiterleitung läuft', result['systemMessage'])
+        context = result['hookSpecificOutput']['additionalContext']
+        self.assertIn('Schlussantwort', context)
+        self.assertIn('Keine weitere Facharbeit', context)
+        self.assertNotIn('waiting_for_origin', context)
+        self.assertNotIn('Details:', context)
+
+    def setUp(self):
+        """Create an isolated Codex home, workspace and session event for each test.
+
+        Install the snapshot fixture under the temporary home and register cleanup.
+        """
+        spec = importlib.util.spec_from_file_location('context_guard', HERE / 'context-handoff-guard.py')
+        self.guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.guard)
+        self.temporary = tempfile.TemporaryDirectory(prefix='thehive-context-fixture-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.home = self.root / 'codex'
+        self.cwd = self.root / 'workspace'
+        self.store = self.cwd / 'work' / 'handoff'
+        self.cwd.mkdir()
+        (self.home / 'sessions').mkdir(parents=True)
+        (self.home / 'hooks').mkdir()
+        shutil.copyfile(SNAPSHOT_SOURCE,
+                        self.home / 'hooks/pre-compaction-snapshot.py')
+        self.session = str(uuid.uuid4())
+        self.transcript = self.home / 'sessions' / ('rollout-fixture-' + self.session + '.jsonl')
+        self.event = dict(hook_event_name='PostToolUse', session_id=self.session,
+                          cwd=str(self.cwd), transcript_path=str(self.transcript), turn_id=str(uuid.uuid4()),
+                          tool_use_id='fixture-tool-call', tool_name='Bash')
+
+    def usage(self, used, window=1000, lifetime=900000, announced=True):
+        """Write a synthetic session transcript with current and lifetime usage values.
+
+        Optionally include the current-turn announcement; overwrite the fixture file.
+        """
+        rows = [dict(type='session_meta', payload=dict(id=self.session, source='cli')),
+                dict(type='event_msg', timestamp='2026-10-26T11:50:00Z', payload=dict(type='token_count',
+                     info=dict(model_context_window=window, total_token_usage=dict(total_tokens=lifetime),
+                               last_token_usage=dict(total_tokens=used)))),
+                dict(type='event_msg', payload=dict(type='task_started', turn_id=self.event['turn_id']))]
+        if announced:
+            rows.append(dict(type='response_item', payload=dict(type='message', role='assistant', phase='commentary',
+                        content=[dict(type='output_text', text=self.guard.ANNOUNCEMENT)])))
+        self.transcript.write_text(''.join(json.dumps(row) + '\n' for row in rows), encoding='utf-8')
+
+    def checkpoint(self, *, bind_task=True):
+        """Save an isolated fixture checkpoint through the real store and return its summary.
+
+        Optionally omit chat_task binding to exercise unbound continuation behavior.
+        """
+        source = """
+const {saveCheckpoint}=require(process.argv[1]);
+const r=saveCheckpoint(process.argv[2],{format_version:1,project_id:'Fixture',session_id:process.argv[3],expected_parent:null,
+chat_task:{source_ref:'human',next_step:{text:'Continue fixture task',task_id:'next',success_criterion:'Fixture proof'}},
+patch:{goal:'OFFLINE_FIXTURE_ONLY',status:'planned',last_section:'Fixture',git:{workspace:process.argv[4]},sources:{human:{reference:'Synthetic offline fixture'}},
+tasks:{next:{text:'Continue fixture task',status:'planned'}},next_step:{text:'Continue fixture task',task_id:'next',success_criterion:'Fixture proof'}}});
+console.log(JSON.stringify({checkpoint_id:r.checkpoint_id,file:r.file,sha256:r.sha256}));
+"""
+        if not bind_task:
+            source = source.replace("chat_task:{source_ref:'human',next_step:{text:'Continue fixture task',task_id:'next',success_criterion:'Fixture proof'}},", '')
+        result = subprocess.run(['node', '-e', source, str(HERE / 'handoff-store.cjs'), str(self.store), self.session, str(self.cwd)],
+                                check=True, capture_output=True, text=True, timeout=10)
+        return json.loads(result.stdout)
+
+    def handle(self):
+        """Return guard feedback for the fixture event, temporary home and handoff store."""
+        return self.guard.handle_event(self.event, codex_home=self.home, handoff_root=self.store)
+
+    def test_workspace_failure_is_actionable_and_stop_is_scoped_to_this_turn(self):
+        """Verify workspace mismatch feedback explains repair and binds the stop to this turn."""
+        self.usage(850)
+        cp = self.checkpoint()
+        other = self.root / 'different-workspace'
+        other.mkdir()
+        code = "const s=require(process.argv[1]);s.saveCheckpoint(process.argv[2],{format_version:1,project_id:'Fixture',session_id:process.argv[3],expected_parent:process.argv[4],patch:{git:{workspace:process.argv[5]}}});"
+        subprocess.run(['node', '-e', code, str(HERE / 'handoff-store.cjs'), str(self.store), self.session,
+                        cp['checkpoint_id'], str(other)], check=True, capture_output=True)
+        result = self.handle()
+        self.assertIn('Arbeitsordner', result['systemMessage'])
+        context = result['hookSpecificOutput']['additionalContext']
+        self.assertIn(self.event['turn_id'], context)
+        self.assertIn('jetzt sichern', context)
+        self.assertNotIn(str(other), result['systemMessage'])
+
+    def test_manual_save_works_without_usage_or_automatic_announcement_and_never_creates(self):
+        """Verify manual save needs no usage/announcement and requests only a start offer."""
+        self.usage(None, announced=False)
+        self.checkpoint()
+        helpers = self.guard._helpers(self.home)
+        with mock.patch.object(self.guard, '_helpers', return_value=helpers), \
+             mock.patch.object(helpers, '_desktop_successor', return_value={'status':'fallback_required'}) as launch:
+            result = self.guard.handle_event(self.event, codex_home=self.home, handoff_root=self.store, manual_save=True)
+        self.assertIn('Arbeitsstand gesichert', result['systemMessage'])
+        self.assertTrue(launch.call_args.kwargs['offer_only'])
+        manifest = json.loads((self.home / 'handoff-snapshots' / self.session / 'context-latest.json').read_text())
+        self.assertEqual(manifest['trigger'], 'manual')
+
+    def test_manual_new_turn_retries_failed_copy_preserving_failed_attempt(self):
+        """Verify a new manual-save turn retains the failed attempt before a verified retry."""
+        self.usage(850)
+        self.checkpoint()
+        helpers = self.guard._helpers(self.home)
+        with mock.patch.object(self.guard, '_helpers', return_value=helpers):
+            with mock.patch.object(helpers, '_copy_prefix', side_effect=OSError('fixture disk failure')):
+                failed = self.handle()
+            self.assertIn('NICHT bestaetigt', failed['stopReason'])
+            parent = self.home / 'handoff-snapshots' / self.session
+            previous = json.loads((parent / 'context-last-attempt.json').read_text())
+            self.event['turn_id'] = str(uuid.uuid4())
+            result = self.guard.handle_event(self.event, codex_home=self.home, handoff_root=self.store, manual_save=True)
+        self.assertIn('Arbeitsstand gesichert', result['systemMessage'])
+        current = json.loads((parent / 'context-last-attempt.json').read_text())
+        retained = json.loads((parent / current['previous_attempt']['file']).read_text())
+        self.assertEqual(retained, previous)
+        self.assertEqual(current['status'], 'verified')
+
+    def test_posttool_after_manual_save_cannot_start_automatic_switch(self):
+        """Verify PostToolUse after manual save reuses confirmation without launching a switch."""
+        self.usage(850, announced=False)
+        self.checkpoint()
+        helpers = self.guard._helpers(self.home)
+        with mock.patch.object(self.guard, '_helpers', return_value=helpers), \
+             mock.patch.object(helpers, '_desktop_successor', return_value={'status':'fallback_required'}) as launch:
+            self.guard.handle_event(self.event, codex_home=self.home, handoff_root=self.store, manual_save=True)
+            launch.reset_mock()
+            result = self.handle()
+        launch.assert_not_called()
+        self.assertIn('Arbeitsstand gesichert', result['systemMessage'])
+        self.assertNotIn(self.guard.ANNOUNCEMENT, result['systemMessage'])
+
+    def manual_cli(self, caller):
+        # Isolated copy changes only the fixture store locator. All real code
+        # and snapshot/Store readers are used, without any app mutation.
+        """Run an isolated manual-save CLI copy as caller and return its process result.
+
+        Redirect only code/store locators; use temporary session paths and never
+        request an automatic desktop mutation.
+        """
+        script = self.root / 'manual-guard-fixture.py'
+        source = (HERE / 'context-handoff-guard.py').read_text(encoding='utf-8')
+        source = source.replace('HERE = Path(__file__).resolve().parent', 'HERE = Path(' + repr(str(HERE)) + ')')
+        source = source.replace("DEFAULT_ROOT = HERE.parent / 'handoff'", 'DEFAULT_ROOT = Path(' + repr(str(self.store)) + ')')
+        script.write_text(source, encoding='utf-8')
+        return subprocess.run([sys.executable, str(script), '--manual-save'], cwd=self.cwd,
+            input=json.dumps(self.event), capture_output=True, text=True, encoding='utf-8', timeout=15,
+            env={**os.environ, 'CODEX_HOME':str(self.home), 'CODEX_THREAD_ID':caller})
+
+    def test_manual_cli_real_roundtrip_saves_and_returns_manual_start(self):
+        """Verify the isolated manual CLI writes a snapshot and offers a manual start link."""
+        self.usage(None, announced=False)
+        self.checkpoint()
+        result = self.manual_cli(self.session)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertIn('Arbeitsstand gesichert', output['systemMessage'])
+        self.assertIn('codex://threads/new?', output['systemMessage'])
+        manifest = json.loads((self.home / 'handoff-snapshots' / self.session / 'context-latest.json').read_text())
+        self.assertFalse(manifest['model_called'])
+        self.assertFalse(manifest['chat_created'])
+
+    def test_manual_cli_foreign_caller_cannot_save_another_session(self):
+        """Verify a mismatched CLI caller cannot save the fixture session."""
+        self.usage(850)
+        self.checkpoint()
+        result = self.manual_cli(str(uuid.uuid4()))
+        self.assertEqual(result.returncode, 0)
+        output = json.loads(result.stdout)
+        self.assertNotIn('Arbeitsstand gesichert', output['systemMessage'])
+        self.assertFalse((self.home / 'handoff-snapshots' / self.session / 'context-latest.json').exists())
+
+    def test_new_explicit_save_command_is_not_intercepted_before_checkpoint_repair(self):
+        """Verify a new user save command leaves checkpoint repair available before capture."""
+        self.usage(850, announced=False)
+        with self.transcript.open('a', encoding='utf-8') as h:
+            h.write(json.dumps(dict(type='response_item', payload=dict(role='user',
+                         content=[dict(type='input_text', text='jetzt sichern\n')]))) + '\n')
+        with mock.patch.object(self.guard, '_capture') as capture:
+            result = self.handle()
+        capture.assert_not_called()
+        self.assertNotIn('continue', result)
+        context = result['hookSpecificOutput']['additionalContext']
+        self.assertIn('--manual-save', context)
+        self.assertNotIn(self.guard.ANNOUNCEMENT, context)
+
+    def test_tool_output_cannot_pretend_to_be_a_manual_user_command(self):
+        """Verify tool text cannot select the manual user-save path."""
+        self.usage(850, announced=False)
+        with self.transcript.open('a', encoding='utf-8') as h:
+            h.write(json.dumps(dict(type='response_item', payload=dict(role='tool',
+                         content=[dict(type='input_text', text='jetzt sichern\n')]))) + '\n')
+        result = self.handle()
+        self.assertIn(self.guard.ANNOUNCEMENT, result['hookSpecificOutput']['additionalContext'])
+
+    def test_manual_user_command_from_another_turn_does_not_suspend_automation(self):
+        """Verify a user save command in another turn cannot authorize manual mode here."""
+        self.usage(850, announced=False)
+        with self.transcript.open('a', encoding='utf-8') as h:
+            h.write(json.dumps(dict(type='response_item', payload=dict(role='user',
+                         content=[dict(type='input_text', text='jetzt sichern\n')]))) + '\n')
+        self.event['turn_id'] = str(uuid.uuid4())
+        result = self.handle()
+        self.assertIn(self.guard.ANNOUNCEMENT, result['hookSpecificOutput']['additionalContext'])
+
+    def test_threshold_announces_before_snapshot_or_app_and_then_completes(self):
+        """Verify threshold handling waits for a current-turn announcement before saving."""
+        self.usage(850, announced=False)
+        self.checkpoint()
+        with mock.patch.object(self.guard, '_capture') as capture:
+            result = self.handle()
+        capture.assert_not_called()
+        self.assertNotIn('continue', result)
+        self.assertIn(self.guard.ANNOUNCEMENT, result['hookSpecificOutput']['additionalContext'])
+        file = self.home / 'handoff-snapshots' / self.session / 'context-observation.json'
+        record = json.loads(file.read_text(encoding='utf-8'))
+        self.assertEqual(record['decision'], 'announcement_pending')
+        self.assertEqual(record['announcement']['turn_id'], self.event['turn_id'])
+        self.assertFalse(list(file.parent.glob('context-*/manifest.json')))
+        with self.transcript.open('a', encoding='utf-8') as h:
+            h.write(json.dumps(dict(type='response_item', payload=dict(type='message', role='assistant', phase='commentary',
+                        content=[dict(type='output_text', text=self.guard.ANNOUNCEMENT)]))) + '\n')
+        complete = self.handle()
+        self.assertIs(complete.get('continue'), False)
+        self.assertIn('Sicherung bestaetigt', complete['stopReason'])
+
+    def test_announcement_from_another_turn_cannot_authorize_transition(self):
+        """Verify an announcement from a different turn cannot trigger capture."""
+        self.usage(850)
+        self.event['turn_id'] = str(uuid.uuid4())
+        with mock.patch.object(self.guard, '_capture') as capture:
+            result = self.handle()
+        capture.assert_not_called()
+        self.assertIn('commentary', result['hookSpecificOutput']['additionalContext'])
+
+    def test_status_reports_real_state_reason_and_exactly_one_manual_link(self):
+        """Verify user text explains allowed reasons and claims opening only when confirmed."""
+        helper = self.guard._helpers(self.home)
+        url = 'codex://threads/new?path=C%3A%5CFixture'
+        for reason, expected in [('new_user_message_after_snapshot', 'neue Nachricht'),
+                                 ('app_access_failed', 'Zugriff auf die App'),
+                                 ('navigation_failed', 'nicht geöffnet')]:
+            with self.subTest(reason=reason):
+                text = helper._transition_message(dict(status='fallback_required', reason_code=reason, manual_start_url=url))
+                self.assertIn('Weiterleitung fehlgeschlagen', text)
+                self.assertIn(expected, text)
+                self.assertEqual(text.count('](' + url + ')'), 1)
+                self.assertNotIn(reason, text)
+        text = helper._transition_message(dict(status='successor_visible'))
+        self.assertNotIn('wurde geöffnet', text)
+        text = helper._transition_message(dict(status='successor_visible', navigation_confirmed=True))
+        self.assertIn('wurde geöffnet', text)
+
+    def test_unbound_chat_still_saves_snapshot_without_foreign_project_order(self):
+        """Verify an unbound task can be saved without borrowing the project continuation."""
+        self.usage(850)
+        self.checkpoint(bind_task=False)
+        result = self.handle()
+        self.assertIn('Sicherung bestaetigt', result['stopReason'])
+        manifest = json.loads((self.home / 'handoff-snapshots' / self.session / 'context-latest.json').read_text())
+        self.assertEqual(manifest['status'], 'PASS')
+        starter = (Path(manifest['snapshot_path']) / 'successor-start.txt').read_text(encoding='utf-8')
+        self.assertIn('Keine automatische Fortsetzung', starter)
+        self.assertNotIn('Continue fixture task', starter)
+
+    def test_current_context_not_lifetime_and_exact_threshold(self):
+        """Verify the exact threshold uses current usage and missing state fails safely."""
+        self.usage(799)
+        self.assertEqual(self.handle(), {})
+        self.usage(800)
+        result = self.handle()
+        self.assertIs(result.get('continue'), False)
+        self.assertIn('NICHT bestaetigt', result['stopReason'])  # Missing fixture checkpoint must fail safe.
+
+    def test_first_snapshot_after_parallel_project_checkpoint_uses_own_history(self):
+        """Verify capture uses this session history without changing newer shared state."""
+        self.usage(850)
+        own = self.checkpoint()
+        source = """
+const {saveCheckpoint}=require(process.argv[1]);
+saveCheckpoint(process.argv[2],{format_version:1,project_id:'Fixture',session_id:process.argv[3],expected_parent:process.argv[4],
+patch:{last_section:'Parallel new regression'}});
+"""
+        subprocess.run(['node', '-e', source, str(HERE / 'handoff-store.cjs'), str(self.store),
+                        str(uuid.uuid4()), own['checkpoint_id']], check=True, capture_output=True, timeout=10)
+        index_before = (self.store / 'index.json').read_bytes()
+        current_before = (self.store / 'Fixture/current.md').read_bytes()
+        result = self.handle()
+        self.assertIn('Sicherung bestaetigt', result['stopReason'])
+        manifest = json.loads((self.home / 'handoff-snapshots' / self.session / 'context-latest.json').read_text())
+        self.assertEqual(manifest['checkpoint_id'], own['checkpoint_id'])
+        start = (Path(manifest['snapshot_path']) / 'successor-start.txt').read_text(encoding='utf-8')
+        self.assertIn(str(self.store / 'Fixture/history'), start)
+        self.assertEqual((self.store / 'index.json').read_bytes(), index_before)
+        self.assertEqual((self.store / 'Fixture/current.md').read_bytes(), current_before)
+
+    def test_obsolete_inline_profile_cannot_override_current_compact_limit(self):
+        """Verify obsolete inline profile selectors do not override the top-level limit."""
+        (self.home / 'config.toml').write_text(
+            'model_auto_compact_token_limit = 900\nprofile = "legacy"\n'
+            '[profiles.legacy]\nmodel_auto_compact_token_limit = 500\n', encoding='utf-8')
+        self.assertEqual(self.guard._compact_limit(self.home, self.cwd, 1000), 900)
+
+    def test_project_profile_keys_cannot_select_a_legacy_compact_limit(self):
+        """Verify project top-level limits override home values without legacy profiles."""
+        (self.home / 'config.toml').write_text('model_auto_compact_token_limit = 900\n', encoding='utf-8')
+        project = self.cwd / '.codex'
+        project.mkdir()
+        (project / 'config.toml').write_text(
+            'model_auto_compact_token_limit = 700\nprofile = "legacy"\n'
+            '[profiles.legacy]\nmodel_auto_compact_token_limit = 200\n', encoding='utf-8')
+        self.assertEqual(self.guard._compact_limit(self.home, self.cwd, 1000), 700)
+
+    def test_unselected_profile_file_is_not_invented_as_active(self):
+        """Verify a separate unselected profile file is ignored by limit detection."""
+        (self.home / 'review.config.toml').write_text('model_auto_compact_token_limit = 200\n', encoding='utf-8')
+        self.assertEqual(self.guard._compact_limit(self.home, self.cwd, 1000), 1000)
+
+    def test_smaller_configured_compact_limit_is_used(self):
+        """Verify threshold calculation honors the smaller configured compaction limit."""
+        self.usage(399)
+        (self.home / 'config.toml').write_text('model_auto_compact_token_limit = 500\n', encoding='utf-8')
+        self.assertEqual(self.handle(), {})
+        self.usage(400)
+        self.assertIs(self.handle().get('continue'), False)
+
+    def test_snapshot_verified_three_fields_and_no_models_or_chat(self):
+        """Verify snapshot bytes, the three-field starter and idempotent local capture."""
+        self.usage(850)
+        cp = self.checkpoint()
+        original = self.transcript.read_bytes()
+        result = self.handle()
+        self.assertIs(result.get('continue'), False)
+        self.assertIn('Sicherung bestaetigt', result['stopReason'])
+        manifest = json.loads((self.home / 'handoff-snapshots' / self.session / 'context-latest.json').read_text())
+        self.assertEqual(manifest['status'], 'PASS')
+        self.assertEqual(manifest['trigger'], 'context_usage')
+        self.assertEqual(manifest['checkpoint_id'], cp['checkpoint_id'])
+        self.assertFalse(manifest['model_called'])
+        self.assertFalse(manifest['chat_created'])
+        directory = Path(manifest['snapshot_path'])
+        self.assertEqual((directory / 'transcript.jsonl').read_bytes(), original)
+        self.assertEqual((directory / 'working.md').read_bytes(), Path(cp['file']).read_bytes())
+        start = (directory / 'successor-start.txt').read_text(encoding='utf-8').splitlines()
+        immutable = self.guard._checkpoint(self.store, self.session, self.cwd)['file']
+        self.assertIn(str(self.store / 'Fixture/history'), immutable)
+        self.assertEqual(start, ['Projekt-ID: Fixture', 'Handoff-Datei: ' + immutable,
+                                 'Naechster offener Arbeitsschritt: Continue fixture task'])
+        self.assertNotIn('OFFLINE_FIXTURE_ONLY', '\n'.join(start))
+        self.assertEqual(self.handle(), result)
+        self.assertEqual(len(list((self.home / 'handoff-snapshots' / self.session).glob('context-*/manifest.json'))), 1)
+
+    def test_foreign_session_or_path_never_claims_usage_or_copies(self):
+        """Verify foreign session IDs and transcript paths cannot produce a snapshot."""
+        self.usage(800)
+        self.event['session_id'] = str(uuid.uuid4())
+        self.assertNotIn('continue', self.handle())
+        self.event['session_id'] = self.session
+        outside = self.root / ('rollout-' + self.session + '.jsonl')
+        outside.write_bytes(self.transcript.read_bytes())
+        self.event['transcript_path'] = str(outside)
+        self.assertNotIn('continue', self.handle())
+        self.assertFalse(list((self.home / 'handoff-snapshots').glob('**/transcript.jsonl')))
+
+    def test_missing_usage_and_subagent_skip_without_false_trigger(self):
+        """Verify subagents are skipped and missing usage does not claim a threshold stop."""
+        self.usage(800)
+        self.event['subagent_id'] = 'fixture-child'
+        self.assertEqual(self.handle(), {})
+        del self.event['subagent_id']
+        self.usage(None)
+        self.assertNotIn('continue', self.handle())
+
+    def test_compacted_marker_invalidates_prior_usage(self):
+        """Verify a compaction marker invalidates the preceding usage measurement."""
+        self.usage(900)
+        with self.transcript.open('a', encoding='utf-8') as h:
+            h.write(json.dumps(dict(type='compacted', payload={})) + '\n')
+        self.assertNotIn('continue', self.handle())
+
+    def test_changed_working_copy_fails_safe_and_no_success_manifest(self):
+        """Verify an altered working projection cannot become a verified latest snapshot."""
+        self.usage(800)
+        self.checkpoint()
+        (self.store / (self.session + '-working.md')).write_text('Unverified change', encoding='utf-8')
+        result = self.handle()
+        self.assertIs(result.get('continue'), False)
+        self.assertIn('NICHT bestaetigt', result['stopReason'])
+        self.assertFalse((self.home / 'handoff-snapshots' / self.session / 'context-latest.json').exists())
+
+    def test_records_execution_below_threshold_without_content_or_snapshot(self):
+        """Verify below-threshold diagnostics omit private tool content and create no snapshot."""
+        self.usage(300)
+        self.event['tool_input'] = {'command': 'PRIVATE_FIXTURE_COMMAND'}
+        self.event['tool_response'] = 'PRIVATE_FIXTURE_RESPONSE'
+        self.assertEqual(self.handle(), {})
+        file = self.home / 'handoff-snapshots' / self.session / 'context-observation.json'
+        self.assertTrue(file.is_file(), 'A real invocation must leave a compact observable record')
+        observed = json.loads(file.read_text(encoding='utf-8'))
+        self.assertEqual(observed['decision'], 'below_threshold')
+        self.assertEqual(observed['native_hook_event'], 'PostToolUse')
+        self.assertEqual(observed['tool_use_id'], 'fixture-tool-call')
+        self.assertEqual(observed['used_tokens'], 300)
+        self.assertEqual(observed['limit_tokens'], 1000)
+        self.assertNotIn('PRIVATE_FIXTURE', file.read_text(encoding='utf-8'))
+        self.assertFalse(list(file.parent.glob('context-*/manifest.json')))
+
+    def test_missing_usage_records_unavailable_instead_of_claiming_measurement(self):
+        """Verify missing usage leaves an unavailable diagnostic without invented token counts."""
+        self.usage(None)
+        self.assertNotIn('continue', self.handle())
+        file = self.home / 'handoff-snapshots' / self.session / 'context-observation.json'
+        self.assertTrue(file.is_file(), 'Unreadable usage must remain distinguishable from a skipped hook')
+        observed = json.loads(file.read_text(encoding='utf-8'))
+        self.assertEqual(observed['decision'], 'usage_unavailable')
+        self.assertNotIn('used_tokens', observed)
+
+    def test_user_prompt_is_not_a_second_context_monitor(self):
+        """Verify UserPromptSubmit events cannot run this PostToolUse snapshot monitor."""
+        self.usage(850)
+        self.checkpoint()
+        self.event['hook_event_name'] = 'UserPromptSubmit'
+        self.assertEqual(self.handle(), {})
+        self.assertFalse((self.home / 'handoff-snapshots').exists())
+
+    def test_appended_messages_reuse_first_verified_snapshot(self):
+        """Verify later messages require an announcement but do not replace the first snapshot."""
+        self.usage(850)
+        self.checkpoint()
+        first = self.handle()
+        latest = self.home / 'handoff-snapshots' / self.session / 'context-latest.json'
+        saved = latest.read_bytes()
+        with self.transcript.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps({'type': 'response_item', 'payload': {'role': 'user', 'content': 'fixture resume question'}}) + '\n')
+        self.event['turn_id'] = str(uuid.uuid4())
+        self.event['tool_use_id'] = 'fixture-followup-tool'
+        pending = self.handle()
+        self.assertNotIn('continue', pending)
+        self.assertIn('commentary', pending['hookSpecificOutput']['additionalContext'])
+        with self.transcript.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(dict(type='event_msg', payload=dict(type='task_started', turn_id=self.event['turn_id']))) + '\n')
+            handle.write(json.dumps(dict(type='response_item', payload=dict(role='assistant', phase='commentary',
+                         content=[dict(type='output_text', text=self.guard.ANNOUNCEMENT)]))) + '\n')
+        self.assertIs(self.handle().get('continue'), False)
+        self.assertEqual(latest.read_bytes(), saved)
+        self.assertEqual(len(list(latest.parent.glob('context-*/manifest.json'))), 1)
+
+    def test_new_usage_same_checkpoint_does_not_restart_capture(self):
+        """Verify a later usage report reuses the same verified checkpoint snapshot."""
+        self.usage(850)
+        self.checkpoint()
+        first = self.handle()
+        latest = self.home / 'handoff-snapshots' / self.session / 'context-latest.json'
+        saved = latest.read_bytes()
+        with self.transcript.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps({'type': 'event_msg', 'timestamp': '2026-10-26T11:51:00Z', 'payload': {
+                'type': 'token_count', 'info': {'model_context_window': 1000, 'last_token_usage': {'total_tokens': 860}}}}) + '\n')
+        self.assertEqual(self.handle(), first)
+        self.assertEqual(latest.read_bytes(), saved)
+        self.assertEqual(len(list(latest.parent.glob('context-*/manifest.json'))), 1)
+
+    def test_changed_resume_file_is_never_claimed_verified(self):
+        """Verify a tampered starter is rejected while checkpoint source bytes remain intact."""
+        self.usage(850)
+        cp = self.checkpoint()
+        original = Path(cp['file']).read_bytes()
+        self.handle()
+        latest = self.home / 'handoff-snapshots' / self.session / 'context-latest.json'
+        manifest = json.loads(latest.read_text())
+        (Path(manifest['snapshot_path']) / 'successor-start.txt').write_text('WRONG PROJECT', encoding='utf-8')
+        result = self.handle()
+        self.assertIs(result.get('continue'), False)
+        self.assertIn('NICHT bestaetigt', result['stopReason'])
+        self.assertEqual(Path(cp['file']).read_bytes(), original)
+        self.assertEqual(len(list(latest.parent.glob('context-*/manifest.json'))), 1)
+
+    def test_failed_copy_is_not_retried_for_same_checkpoint(self):
+        """Verify repeated automatic calls retain failure and do not retry a failed copy."""
+        self.usage(850)
+        cp = self.checkpoint()
+        original = Path(cp['file']).read_bytes()
+        helpers = self.guard._helpers(self.home)
+        with mock.patch.object(self.guard, '_helpers', return_value=helpers):
+            with mock.patch.object(helpers, '_copy_prefix', side_effect=OSError('fixture disk write failure')) as copy:
+                first = self.handle()
+                second = self.handle()
+        self.assertIs(first.get('continue'), False)
+        self.assertIs(second.get('continue'), False)
+        self.assertIn('NICHT bestaetigt', second['stopReason'])
+        self.assertEqual(copy.call_count, 1)
+        self.assertEqual(Path(cp['file']).read_bytes(), original)
+        self.assertFalse((self.home / 'handoff-snapshots' / self.session / 'context-latest.json').exists())
+
+    def test_invalid_attempt_metadata_still_returns_safe_stop(self):
+        """Verify malformed attempt metadata prevents a successful snapshot and stops safely."""
+        self.usage(850)
+        self.checkpoint()
+        parent = self.home / 'handoff-snapshots' / self.session
+        parent.mkdir(parents=True)
+        (parent / 'context-last-attempt.json').write_text('[]', encoding='utf-8')
+        result = self.handle()
+        self.assertIs(result.get('continue'), False)
+        self.assertIn('NICHT bestaetigt', result['stopReason'])
+        self.assertFalse((parent / 'context-latest.json').exists())
+
+    def test_usage_failure_records_bounded_reason_without_private_error(self):
+        """Verify usage-read failures record only a bounded safe error code."""
+        self.usage(300)
+        with mock.patch.object(self.guard, '_usage', side_effect=OSError('PRIVATE_FIXTURE_SOURCE_DETAILS')):
+            self.assertNotIn('continue', self.handle())
+        file = self.home / 'handoff-snapshots' / self.session / 'context-observation.json'
+        observed = json.loads(file.read_text(encoding='utf-8'))
+        self.assertEqual(observed.get('usage_error_code'), 'source_unreadable')
+        self.assertNotIn('PRIVATE_FIXTURE', file.read_text(encoding='utf-8'))
+
+    def test_missing_usage_records_specific_safe_reason(self):
+        """Verify missing token usage records its specific allowed diagnostic code."""
+        self.usage(None)
+        self.handle()
+        file = self.home / 'handoff-snapshots' / self.session / 'context-observation.json'
+        observed = json.loads(file.read_text(encoding='utf-8'))
+        self.assertEqual(observed.get('usage_error_code'), 'usage_signal_missing')
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows extended path regression')
+    def test_windows_extended_transcript_below_threshold(self):
+        """Verify an extended Windows drive path supports below-threshold usage reads."""
+        self.usage(300)
+        self.event['transcript_path'] = '\\\\?\\' + str(self.transcript)
+        self.assertEqual(self.handle(), {})
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows extended path regression')
+    def test_windows_extended_transcript_saves_at_threshold(self):
+        """Verify an extended Windows transcript path supports a verified threshold save."""
+        self.usage(800)
+        self.checkpoint()
+        self.event['transcript_path'] = '\\\\?\\' + str(self.transcript)
+        result = self.handle()
+        self.assertIs(result.get('continue'), False)
+        self.assertIn('Sicherung bestaetigt', result['stopReason'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows extended path regression')
+    def test_windows_extended_foreign_path_and_unc_stay_rejected(self):
+        """Verify extended foreign-drive and UNC transcript paths remain rejected."""
+        self.usage(800)
+        outside = self.root / ('rollout-' + self.session + '.jsonl')
+        outside.write_bytes(self.transcript.read_bytes())
+        for value in ('\\\\?\\' + str(outside), '\\\\?\\UNC\\fixture.invalid\\share\\rollout-' + self.session + '.jsonl'):
+            with self.subTest(path_kind='outside' if value.endswith(str(outside)) else 'UNC'):
+                self.event['transcript_path'] = value
+                self.assertNotIn('continue', self.handle())
+        self.assertFalse(list((self.home / 'handoff-snapshots').glob('**/transcript.jsonl')))
+
+
+if __name__ == '__main__':
+    unittest.main()

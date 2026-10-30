@@ -1,0 +1,22 @@
+
+# Local and private data
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.key
+__pycache__/
+.venv/
+node_modules/
+logs/
+runtime/
+data/
+daten/
+dokumente/
+Chats/
+
+# Generated native watcher status and diagnostics
+work/maintenance/native-index-watch.json
+work/maintenance/*-native-watch.stdout.log
+work/maintenance/*-native-watch.stderr.log

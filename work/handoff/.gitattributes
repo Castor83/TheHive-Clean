@@ -1,0 +1,8 @@
+# Byte hashes must remain stable on Windows Git checkout. No normalization of
+# immutable checkpoint records or opaque master/standard source copies.
+index.json -text
+*-working.md -text
+*/current.md -text
+*/history/* -text
+TheHive/THEHIVE_MASTER_HANDOFF_*.md -text
+global/00_GLOBALER_HANDOFF_STANDARD_*.md -text
