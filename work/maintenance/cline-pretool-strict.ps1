@@ -24,10 +24,12 @@ try {
     $observedName = $name
     if ($name -eq 'thehive-memory____brain__create__note') { $name = 'thehive-memory__brain_create_note' }
     if ($name -eq 'use__mcp__tool') { $name = 'use_mcp_tool' }
-    $receiptDir = Join-Path $env:USERPROFILE '.cline\data\logs'
-    [IO.Directory]::CreateDirectory($receiptDir) | Out-Null
-    $receipt = @{event='PreToolUse'; task_id=$data.taskId; ts_utc=[DateTime]::UtcNow.ToString('o'); tool_name=$observedName; strict_guard_version=2} | ConvertTo-Json -Compress
-    [IO.File]::AppendAllText((Join-Path $receiptDir 'thehive-learning-hooks.jsonl'), $receipt + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    try {
+        $receiptDir = Join-Path $env:USERPROFILE '.cline\data\logs'
+        [IO.Directory]::CreateDirectory($receiptDir) | Out-Null
+        $receipt = @{event='PreToolUse'; task_id=$data.taskId; ts_utc=[DateTime]::UtcNow.ToString('o'); tool_name=$observedName; strict_guard_version=2} | ConvertTo-Json -Compress
+        [IO.File]::AppendAllText((Join-Path $receiptDir 'thehive-learning-hooks.jsonl'), $receipt + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    } catch { } # Diagnosebeleg darf die Strict-Entscheidung nicht ersetzen.
     $target = $name -eq 'thehive-memory__brain_create_note'
     if ($name -eq 'use_mcp_tool' -and $argsObject.server_name -eq 'thehive-memory' -and $argsObject.tool_name -eq 'brain_create_note') {
         $target = $true

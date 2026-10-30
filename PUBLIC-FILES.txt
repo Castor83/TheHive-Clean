@@ -1,5 +1,6 @@
 work/handoff/.gitattributes
 work/maintenance/cline-pretool-strict.ps1
+work/maintenance/cline-pretool-strict.test.cjs
 work/maintenance/codex-app-pipe.cjs
 work/maintenance/codex-app-pipe.test.cjs
 work/maintenance/context-handoff-guard.py
