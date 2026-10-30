@@ -207,7 +207,15 @@ function withLock(root, fn) {
   const gate = safe(root, '.lock-gate');
   let gateFd, fd;
   const token = crypto.randomUUID();
-  try { gateFd = fs.openSync(gate, 'wx'); } catch { throw Error('Lock acquisition busy; retained gate needs owner inspection after a crash'); }
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  for (let retries = 0; ; retries++) {
+    try { gateFd = fs.openSync(gate, 'wx'); break; }
+    catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      if (retries >= 20) throw Error('Lock acquisition busy; retry limit reached');
+      Atomics.wait(wait, 0, 0, 10);
+    }
+  }
   try {
     fs.writeFileSync(gateFd, JSON.stringify({ pid: process.pid, host: os.hostname(), token }));
     if (fs.existsSync(file)) {
