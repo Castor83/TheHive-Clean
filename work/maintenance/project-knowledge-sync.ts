@@ -83,10 +83,16 @@ function collect(project: any) {
 }
 async function osbWriter(vault: string, op: any, requestId: string) {
   // Same process-local identity and existing gate config as the Codex MCP registration.
-  process.env.VAULT_AGENT_NAME = 'codex-desktop-agent';
-  const source = path.join(os.homedir(), 'projects/open-second-brain/src/core/brain/write-batch.ts');
-  const { applyWriteBatch } = await import(pathToFileURL(source).href);
-  return applyWriteBatch(vault, [op], { configPath: path.join(os.homedir(), 'AppData/Local/open-second-brain/config.yaml'), requestId });
+  const previousAgent = process.env.VAULT_AGENT_NAME;
+  try {
+    process.env.VAULT_AGENT_NAME = 'codex-desktop-agent';
+    const source = path.join(os.homedir(), 'projects/open-second-brain/src/core/brain/write-batch.ts');
+    const { applyWriteBatch } = await import(pathToFileURL(source).href);
+    return await applyWriteBatch(vault, [op], { configPath: path.join(os.homedir(), 'AppData/Local/open-second-brain/config.yaml'), requestId });
+  } finally {
+    if (previousAgent === undefined) delete process.env.VAULT_AGENT_NAME;
+    else process.env.VAULT_AGENT_NAME = previousAgent;
+  }
 }
 export async function syncKnowledge(options: any = {}) {
   const vault = path.resolve(options.vault ?? ROOT);

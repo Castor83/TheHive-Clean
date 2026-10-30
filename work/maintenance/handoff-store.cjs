@@ -49,6 +49,9 @@ function validate(input) {
   const allowed = ['format_version', 'project_id', 'session_id', 'expected_parent', 'patch', 'chat_task'];
   if (Object.keys(input).some(k => !allowed.includes(k))) throw Error('Schema: unknown envelope field');
   projectAlias(input.project_id); identifier(input.session_id, 'session_id');
+  if (UUID.test(input.session_id) && input.session_id !== input.session_id.toLowerCase()) {
+    throw Error('Schema: canonical lowercase session UUID required');
+  }
   if (input.expected_parent !== null && !/^[a-f0-9]{64}$/.test(input.expected_parent || '')) throw Error('Schema: expected_parent must be null or checkpoint SHA256');
   if (!object(input.patch) || !Object.keys(input.patch).length) throw Error('Schema: nonempty patch required');
   if (Object.keys(input.patch).some(k => !FIELDS.has(k))) throw Error('Schema: unknown state field; durable promotion is unavailable');
@@ -209,14 +212,10 @@ function withLock(root, fn) {
   const token = crypto.randomUUID();
   const wait = new Int32Array(new SharedArrayBuffer(4));
   for (let retries = 0; ; retries++) {
-    try { gateFd = fs.openSync(gate, 'wx'); break; }
-    catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      if (retries >= 20) throw Error('Lock acquisition busy; retry limit reached');
-      Atomics.wait(wait, 0, 0, 10);
-    }
-  }
-  try {
+    gateFd = undefined;
+    try { gateFd = fs.openSync(gate, 'wx'); }
+    catch (e) { if (e.code !== 'EEXIST') throw e; }
+    if (gateFd !== undefined) try {
     fs.writeFileSync(gateFd, JSON.stringify({ pid: process.pid, host: os.hostname(), token }));
     if (fs.existsSync(file)) {
       const held = json(root, '.writer.lock');
@@ -224,15 +223,21 @@ function withLock(root, fn) {
       if (held.host === os.hostname() && Number.isSafeInteger(held.pid)) {
         try { process.kill(held.pid, 0); } catch (e) { if (e.code === 'ESRCH') alive = false; }
       }
-      if (alive) throw Error('Writer lock held; retry after the other writer finishes');
-      fs.renameSync(file, safe(root, '.writer.lock.stale-' + crypto.randomUUID()));
+      if (!alive) fs.renameSync(file, safe(root, '.writer.lock.stale-' + crypto.randomUUID()));
     }
-    try { fd = fs.openSync(file, 'wx'); } catch { throw Error('Writer lock conflict'); }
-    try {
+    try { fd = fs.openSync(file, 'wx'); }
+    catch (e) { if (e.code !== 'EEXIST') throw e; }
+    if (fd !== undefined) try {
       fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, host: os.hostname(), at: new Date().toISOString(), token }));
       fs.fsyncSync(fd);
     } catch (e) { fs.closeSync(fd); fd = undefined; fs.unlinkSync(file); throw e; }
-  } finally { fs.closeSync(gateFd); fs.unlinkSync(gate); }
+    } finally { fs.closeSync(gateFd); fs.unlinkSync(gate); }
+    if (fd !== undefined) break;
+    if (retries >= 100) throw Error('Writer lock held or lock acquisition busy; retry limit reached');
+    // Release the gate while waiting so the current owner and other acquirers
+    // can finish. Both gate contention and live owners share this finite budget.
+    Atomics.wait(wait, 0, 0, 20);
+  }
   let result, operationError, failed = false;
   try { recover(root); result = fn(); }
   catch (error) { operationError = error; failed = true; }

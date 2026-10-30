@@ -271,8 +271,19 @@ def _capture(event, home, root, transcript, usage, helpers, manual_save=False):
     parent.mkdir(parents=True, exist_ok=True)
     lock = parent / 'context.lock'
     nonce = uuid.uuid4().hex
-    with lock.open('x', encoding='ascii') as handle:
-        handle.write(nonce)
+    lock_content = json.dumps(dict(pid=os.getpid(), created_at_utc=datetime.now(timezone.utc).isoformat(), nonce=nonce))
+    try:
+        with lock.open('x', encoding='ascii') as handle:
+            handle.write(lock_content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError:
+        error = ValueError('capture_lock_retained: Sperrdatei ' + str(lock)
+                           + ' bleibt erhalten. Besitzer/PID und laufende Sicherungen manuell pruefen; '
+                           'nur bei bestaetigt beendetem Besitzer die Sperre manuell umbenennen und erneut sichern. '
+                           'Alter allein belegt keinen beendeten Prozess.')
+        error.save_error_code = 'capture_lock_retained'
+        raise error
     attempt = None
     attempt_file = parent / 'context-last-attempt.json'
     try:
@@ -355,7 +366,7 @@ def _capture(event, home, root, transcript, usage, helpers, manual_save=False):
                 pass  # Keep the initial attempt marker if the disk is unavailable.
         raise
     finally:
-        if lock.is_file() and lock.read_text(encoding='ascii') == nonce:
+        if lock.is_file() and lock.read_text(encoding='ascii') == lock_content:
             lock.unlink()
 
 
@@ -435,6 +446,7 @@ def handle_event(event, *, codex_home=None, handoff_root=None, manual_save=False
     except (OSError, ValueError, TypeError, KeyError):
         return {'systemMessage': 'Chatweiterleitung wartet: sichtbare Vorankündigung nicht gebunden. Kein automatischer Wechsel gestartet.'}
     snapshot_saved = False
+    repair_hint = ''
     try:
         root = Path(handoff_root or DEFAULT_ROOT).resolve(strict=True)
         manifest = (_capture(event, home, root, transcript, usage, helpers, manual_save=True) if manual_save
@@ -462,6 +474,8 @@ def handle_event(event, *, codex_home=None, handoff_root=None, manual_save=False
         code = getattr(exc, 'save_error_code', None) or ('disk_full' if isinstance(exc, OSError) and exc.errno == 28 else
                 'write_denied' if isinstance(exc, PermissionError) else 'snapshot_write_failed')
         desktop = dict(status='fallback_required', successor_thread_id=None, save_error_code=code)
+        if code == 'capture_lock_retained':
+            repair_hint = str(exc)
         _observe(event, home, helpers, 'stop_unverified', usage, save_error_code=code)
         reason = (f'Kontextschwelle {THRESHOLD_PERCENT}% erreicht; lokale Sicherung NICHT bestaetigt. Alter Durchlauf vorsorglich '
                   'gestoppt. Arbeitsstand/Index lokal pruefen, keinen Nachfolger blind duplizieren, alten Chat nicht archivieren.')
@@ -470,6 +484,8 @@ def handle_event(event, *, codex_home=None, handoff_root=None, manual_save=False
         reason = ('Manuelle Sicherung bestaetigt.' if snapshot_saved else
                   'Manuelle Sicherung noch offen; gezielte Reparatur bleibt erlaubt.')
     visible = helpers._transition_message(desktop if 'desktop' in locals() else {}, snapshot_saved)
+    if repair_hint:
+        visible += '\n\n' + repair_hint
     if manual_save and snapshot_saved:
         visible = _manual_message(desktop)
     instruction = ('Gib JETZT als Schlussantwort ausschliesslich die folgende Uebergabemeldung aus. '

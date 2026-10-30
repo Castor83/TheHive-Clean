@@ -16,6 +16,21 @@ SNAPSHOT_SOURCE = HERE / "fixtures/pre-compaction-snapshot.py"
 
 
 class ContextGuardTests(unittest.TestCase):
+    def test_retained_capture_lock_has_actionable_diagnostic_without_removal(self):
+        self.checkpoint()
+        self.usage(800)
+        parent = self.home / 'handoff-snapshots' / self.session
+        parent.mkdir(parents=True)
+        lock = parent / 'context.lock'
+        for content in ('legacy-nonce', json.dumps({'pid': os.getpid(), 'created_at_utc': '2026-10-30'})):
+            lock.write_text(content, encoding='ascii')
+            with self.subTest(content=content):
+                result = self.handle()
+                self.assertIn('capture_lock_retained', result['systemMessage'])
+                self.assertIn(str(lock), result['systemMessage'])
+                self.assertIn('manuell', result['systemMessage'])
+                self.assertEqual(lock.read_text(encoding='ascii'), content)
+
     def test_python_node_boundary_preserves_waiting_status_and_failure_reason(self):
         spec = importlib.util.spec_from_file_location('precompact_boundary', SNAPSHOT_SOURCE)
         helper = importlib.util.module_from_spec(spec)
