@@ -586,6 +586,58 @@ test('an uncertain archive outcome is never blindly requested twice',async t=>{
   const input={...f.input,operation:'confirm_takeover',successor_session_id:f.child,turn_id:crypto.randomUUID()};await adapter.ensureSuccessor(input,{app:f.app,codexHome:f.home});await adapter.ensureSuccessor(input,{app:f.app,codexHome:f.home});assert.equal(f.archives(),1);
 });
 
+for(const operation of ['confirm_takeover','resume_archive'])test('a later user message restores an origin after its archive response was lost: '+operation,async t=>{
+  const f=fixture(t,{checkpointWorkspace:true}),adapter=isolatedAdapter(f,conditionalPolicy(f)),original=f.app.callAppTool;
+  await adapter.ensureSuccessor(f.input,{app:f.app,codexHome:f.home});
+  saveCheckpoint(f.root,{format_version:1,project_id:'Fixture',session_id:f.child,expected_parent:f.cp.checkpoint_id,patch:{last_section:'Successor uptake'}});
+  f.app.callAppTool=async call=>{const r=await original(call);if(call.tool.name==='set_thread_archived'&&call.args.archived)throw Error('Lost archive response');return r;};
+  const input={...f.input,operation:'confirm_takeover',successor_session_id:f.child,turn_id:crypto.randomUUID()};
+  const first=await adapter.ensureSuccessor(input,{app:f.app,codexHome:f.home});
+  assert.equal(first.archive_pending,true);assert.equal(f.archives(),1);assert.equal(f.restores(),0);
+  appendUser(f);const retained=fs.readFileSync(f.source,'utf8');
+  const next={...input,operation,caller_session_id:f.child,turn_id:crypto.randomUUID()};
+  const result=await adapter.ensureSuccessor(next,{app:f.app,codexHome:f.home});
+  assert.equal(result.reason_code,'new_user_message_after_snapshot');assert.equal(result.origin_restored,true);
+  assert.equal(f.restores(),1);assert.equal(f.archives(),1);assert.equal(f.creates(),1);
+  await adapter.ensureSuccessor(next,{app:f.app,codexHome:f.home});assert.equal(f.restores(),1);
+  assert.equal(fs.readFileSync(f.source,'utf8'),retained);
+});
+
+for(const fault of ['restore_error','restore_timeout','proof_changed','wrong_project','message_during_read'])test('late archive cancellation preserves bounds and binding: '+fault,async t=>{
+  const f=fixture(t,{checkpointWorkspace:true}),adapter=isolatedAdapter(f,conditionalPolicy(f)),original=f.app.callAppTool;
+  let lockHeldDuringRestore;
+  await adapter.ensureSuccessor(f.input,{app:f.app,codexHome:f.home});
+  saveCheckpoint(f.root,{format_version:1,project_id:'Fixture',session_id:f.child,expected_parent:f.cp.checkpoint_id,patch:{last_section:'Successor uptake'}});
+  f.app.callAppTool=async call=>{const r=await original(call);if(call.tool.name==='set_thread_archived'&&call.args.archived)throw Error('Lost response');return r;};
+  const input={...f.input,operation:'confirm_takeover',successor_session_id:f.child,turn_id:crypto.randomUUID()};
+  await adapter.ensureSuccessor(input,{app:f.app,codexHome:f.home});
+  if(fault!=='message_during_read')appendUser(f);
+  if(fault==='proof_changed'){
+    const file=path.join(f.input.snapshot_path,'takeover-proof.json'),p=JSON.parse(fs.readFileSync(file));
+    p.successor_session_id=crypto.randomUUID();fs.writeFileSync(file,JSON.stringify(p));
+  }
+  if(fault==='wrong_project')f.threads.find(x=>x.threadId===f.child).projectId=crypto.randomUUID();
+  f.app.callAppTool=async call=>{
+    const r=await original(call);
+    if(fault==='message_during_read'&&call.tool.name==='read_thread')appendUser(f);
+    if(call.tool.name==='set_thread_archived'&&!call.args.archived){
+      if(fault==='restore_error')throw Error('Unknown restore outcome');
+      if(fault==='restore_timeout')return new Promise(()=>{setTimeout(()=>{lockHeldDuringRestore=fs.existsSync(path.join(f.root,f.session+'-desktop.lock'));},25);});
+    }
+    return r;
+  };
+  const next={...input,operation:'resume_archive',caller_session_id:f.child,turn_id:crypto.randomUUID()};
+  const started=Date.now(),result=await adapter.ensureSuccessor(next,{app:f.app,codexHome:f.home});
+  assert.ok(Date.now()-started<5000);
+  if(fault==='restore_timeout')assert.equal(lockHeldDuringRestore,true);
+  if(['proof_changed','wrong_project'].includes(fault))assert.equal(f.restores(),0);
+  else {
+    assert.equal(f.restores(),1);assert.equal(result.origin_restored,fault==='message_during_read');
+    await adapter.ensureSuccessor(next,{app:f.app,codexHome:f.home});assert.equal(f.restores(),1);
+  }
+  assert.equal(f.archives(),1);assert.equal(f.creates(),1);
+});
+
 for(const failure of ['throw','timeout'])test('new input after an uncertain '+failure+' archive gets one bounded restoration',async t=>{
   const f=fixture(t,{checkpointWorkspace:true}),adapter=isolatedAdapter(f,conditionalPolicy(f)),original=f.app.callAppTool;await adapter.ensureSuccessor(f.input,{app:f.app,codexHome:f.home});
   saveCheckpoint(f.root,{format_version:1,project_id:'Fixture',session_id:f.child,expected_parent:f.cp.checkpoint_id,patch:{last_section:'Successor uptake'}});

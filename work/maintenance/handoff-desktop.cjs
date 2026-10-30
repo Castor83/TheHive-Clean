@@ -282,7 +282,29 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
       const base=threadId===input.session_id?(state.naming?.current_title||state.originTitle||cp.project_id):(state.naming?.successor_title||cp.project_id+' – Fortsetzung');
       try{await call('set_thread_title',{threadId,title:('['+label+'] '+base).slice(0,240)});}catch{}
     }
-    const initialBlock=fresh();if(initialBlock){await visibleNotice('Übergabe angehalten');return initialBlock;}
+    /**
+     * Restore the bound origin once after cancellation of an attempted archive.
+     * Call only after takeover/project proof validation; persist the attempt
+     * before the RPC and retain an unknown outcome instead of retrying it.
+     */
+    async function restoreCancelledArchive(blocked,outcome='unknown'){
+      if(state.archiveRestorationAttemptedAt)return {...blocked,origin_restored:state.originRestored===true};
+      save('takeover_verified',{archiveRestorationAttemptedAt:new Date().toISOString(),archiveOutcome:outcome});
+      let restored=false,timer;
+      try{
+        const tool=tools.find(t=>t.name==='set_thread_archived');if(!tool)throw Error('Restore tool unavailable');
+        const budget=1500;
+        const result=app.decodeToolResult(await Promise.race([app.callAppTool({tool,args:{threadId:input.session_id,archived:false,hostId:'local'},threadId:resuming?input.caller_session_id:input.successor_session_id,turnId:input.turn_id,callId:crypto.randomUUID(),timeoutMs:budget}),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Restore deadline')),budget);})]));
+        restored=result.threadId===input.session_id&&result.archived===false;
+      }catch{}finally{clearTimeout(timer);}
+      save('takeover_verified',{originRestored:restored});
+      return {...blocked,origin_restored:restored};
+    }
+    const initialBlock=fresh();
+    const pendingArchive=confirming&&state.phase==='takeover_verified'&&state.archiveAttemptedAt;
+    // A cancelled, uncertain archive still needs its single safety rollback.
+    // Defer that cancellation until the exact takeover proof is validated.
+    if(initialBlock&&!pendingArchive){await visibleNotice('Übergabe angehalten');return initialBlock;}
     if(!confirming&&!state.naming){
       let title=state.originTitle;
       if(!title){
@@ -361,9 +383,9 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
         (state.manualAuthorization&&require('./handoff-manual-start.cjs').manualProjectMatches(t,state.manualAuthorization,project.projectId,cwd))));
       if(!belongs(input.successor_session_id))throw Error('Successor not in exact app project');
       if(resuming&&!belongs(input.caller_session_id))throw Error('Completion caller not in exact app project');
-      const blocked=fresh();if(blocked)return blocked;
+      const blocked=initialBlock||fresh();if(blocked&&!pendingArchive)return blocked;
       const proof=path.join(dir,'takeover-proof.json');
-      if(resuming){
+      if(resuming||state.archiveAttemptedAt){
         const p=read(proof);
         if(!['takeover_verified','archived_after_takeover'].includes(state.phase)||state.takeoverEvidence!==proof||p.uptake_verified!==true||
           p.origin_session_id!==input.session_id||p.successor_session_id!==input.successor_session_id||p.app_project_id!==project.projectId||p.workspace!==cwd||
@@ -373,6 +395,7 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
         write(proof,{schema_version:1,origin_session_id:input.session_id,successor_session_id:input.successor_session_id,app_project_id:project.projectId,workspace:cwd,checkpoint_examined:cp.checkpoint_id,origin_checkpoint_id:originSnapshot.checkpoint_id,uptake_verified:true,checked_at_utc:new Date().toISOString()});
         save('takeover_verified',{takenOverAt:state.takenOverAt||new Date().toISOString(),takeoverEvidence:proof,uptakeCheckpointId:cp.checkpoint_id});
       }
+      if(blocked){await visibleNotice('Übergabe angehalten');return await restoreCancelledArchive(blocked,state.archiveOutcome||'unknown');}
       if(state.phase==='archived_after_takeover')return {status:'archived_after_takeover',successor_thread_id:state.successorThreadId};
       const origin=await call('read_thread',{threadId:input.session_id,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:200});
       const status=origin.thread?.status?.type||origin.thread?.status;
@@ -386,25 +409,14 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
         }
         return {status:'takeover_verified',successor_thread_id:state.successorThreadId,archive_pending:true,archive_pending_reason:'origin_busy'};
       }
-      const lateBlock=fresh();if(lateBlock)return lateBlock;
+      const lateBlock=fresh();if(lateBlock)return pendingArchive?await restoreCancelledArchive(lateBlock,state.archiveOutcome||'unknown'):lateBlock;
       if(state.archiveAttemptedAt)return {status:'takeover_verified',successor_thread_id:state.successorThreadId,archive_pending:true};
       save('takeover_verified',{archiveAttemptedAt:new Date().toISOString()});
       let archiveConfirmed=false;
       try{const archived=await call('set_thread_archived',{threadId:input.session_id,archived:true,hostId:'local'});archiveConfirmed=archived.threadId===input.session_id&&archived.archived===true;}catch{}
       const afterArchive=fresh();
       if(afterArchive){
-        let restored=false;
-        save('takeover_verified',{archiveRestorationAttemptedAt:new Date().toISOString(),archiveOutcome:archiveConfirmed?'confirmed':'unknown'});
-        // A single safety cleanup has its own 1.5s budget even if the original RPC used its deadline.
-        let timer;
-        try{
-          const tool=tools.find(t=>t.name==='set_thread_archived');if(!tool)throw Error('Restore tool unavailable');
-          const budget=1500;
-          const result=app.decodeToolResult(await Promise.race([app.callAppTool({tool,args:{threadId:input.session_id,archived:false,hostId:'local'},threadId:resuming?input.caller_session_id:input.successor_session_id,turnId:input.turn_id,callId:crypto.randomUUID(),timeoutMs:budget}),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Restore deadline')),budget);})]));
-          restored=result.threadId===input.session_id&&result.archived===false;
-        }catch{}finally{clearTimeout(timer);}
-        save('takeover_verified',{originRestored:restored});
-        return {...afterArchive,origin_restored:restored};
+        return await restoreCancelledArchive(afterArchive,archiveConfirmed?'confirmed':'unknown');
       }
       if(!archiveConfirmed)return {status:'takeover_verified',successor_thread_id:state.successorThreadId,archive_pending:true};
       return save('archived_after_takeover',{archivedAt:new Date().toISOString()});
