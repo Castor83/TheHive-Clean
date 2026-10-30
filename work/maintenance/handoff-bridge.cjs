@@ -7,6 +7,9 @@ const crypto = require('node:crypto');
 const { TextDecoder } = require('node:util');
 const MAX_BYTES = 1024 * 1024;
 
+/**
+ * Parse one explicit synchronized envelope source; preview is default and apply requires a supplied preview SHA-256.
+ */
 function parseArgs(argv) {
   const options = { apply: false, root: 'C:\\TheHive\\work\\handoff' };
   const seen = new Set();
@@ -28,11 +31,19 @@ function parseArgs(argv) {
   return options;
 }
 
+/**
+ * Return an absolute path comparison key, folding case only on Windows.
+ */
 function normalized(file) {
   const absolute = path.resolve(file);
   return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
 }
 
+/**
+ * Read one bounded regular UTF-8 JSON envelope while checking link redirection and file stability; return parsed input, absolute source and SHA-256.
+ * @param {string} source Explicit synchronized local JSON file.
+ * @returns {object} Fingerprinted version-1 envelope; full schema validation remains the store responsibility.
+ */
 function readEnvelope(source) {
   const absolute = path.resolve(source);
   const before = fs.lstatSync(absolute);
@@ -68,6 +79,11 @@ function readEnvelope(source) {
   return { source_file: absolute, input, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
 }
 
+/**
+ * Preview a synchronized envelope without persistence, or save it through the store after matching and rechecking its confirmed hash.
+ * @param {object} options Source, optional store root, apply flag and confirmed preview hash.
+ * @returns {object} Preview metadata or confirmed local store result; never performs synchronization or network calls.
+ */
 function execute(options) {
   const source = readEnvelope(options.source);
   const metadata = { source_file: source.source_file, source_sha256: source.sha256,

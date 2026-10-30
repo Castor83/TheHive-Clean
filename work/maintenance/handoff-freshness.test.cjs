@@ -1,8 +1,17 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
 const {checkSnapshotFreshness}=require('./handoff-freshness.cjs');
+/**
+ * Return the SHA-256 of fixture bytes for controlled integrity assertions.
+ */
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+/**
+ * Encode one synthetic JSONL row with its required newline boundary.
+ */
 const line=value=>Buffer.from(JSON.stringify(value)+'\n');
+/**
+ * Create a bound synthetic main-session transcript, snapshot copy and hash manifest with mutation helpers; register guarded temporary cleanup.
+ */
 function fixture(t){
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'thehive-freshness-'));
   t.after(()=>{assert.ok(path.resolve(dir).startsWith(path.resolve(os.tmpdir())+path.sep));assert.ok(path.basename(dir).startsWith('thehive-freshness-'));fs.rmSync(dir,{recursive:true,force:true});});
@@ -10,12 +19,21 @@ function fixture(t){
   const snapshotPath=path.join(codexHome,'handoff-snapshots',sessionId,'capture'),copy=path.join(snapshotPath,'transcript.jsonl'),manifestFile=path.join(snapshotPath,'manifest.json');
   fs.mkdirSync(path.dirname(source),{recursive:true});fs.mkdirSync(snapshotPath,{recursive:true});fs.mkdirSync(path.join(codexHome,'archived_sessions'),{recursive:true});
   const manifest={status:'PASS',session_id:sessionId,transcript:{file:'transcript.jsonl',source,bytes:0,sha256:''}};
+  /**
+   * Persist the current synthetic transcript manifest after a deliberate fixture mutation.
+   */
   const saveManifest=()=>fs.writeFileSync(manifestFile,JSON.stringify(manifest));
+  /**
+   * Replace fixture source and copy bytes together, update their byte count/hash and save the synthetic manifest.
+   */
   const prefix=(bytes)=>{fs.writeFileSync(source,bytes);fs.writeFileSync(copy,bytes);manifest.transcript.bytes=bytes.length;manifest.transcript.sha256=hash(bytes);saveManifest();};
   prefix(Buffer.concat([line({type:'session_meta',payload:{id:sessionId,source:'cli'}}),line({type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text:'PRIVATE_SAVED_USER_TEXT'}]}})]));
   const args={snapshotPath,codexHome,sessionId};
   return {dir,args,source,copy,manifestFile,manifest,prefix,saveManifest,append:value=>fs.appendFileSync(source,line(value))};
 }
+/**
+ * Assert the expected freshness status and bounded metadata shape, ensuring no private fixture text leaks into results.
+ */
 function inspect(result,status){
   assert.equal(result.status,status);assert.equal(typeof result.reason_code,'string');assert.ok(result.reason_code.length>0);
   assert.ok(Object.keys(result).every(key=>['status','reason_code','source','bytes'].includes(key)));

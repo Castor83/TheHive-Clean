@@ -18,6 +18,9 @@ type LocalBinding = {
   project_id: 'TheHive';
   canonical_paths: { authorized_root: string; workspace: string; vault: string };
 };
+/**
+ * Evaluate the fixed operator-approved TheHive root exception using canonical paths and exact persisted project spelling; return binding or a visible reason without inheriting authority to subdirectories.
+ */
 function localSelfBinding(projectId: string, workspace: string | undefined, vault: string): {
   binding?: LocalBinding; reason_code?: string; reason?: string;
 } {
@@ -30,6 +33,9 @@ function localSelfBinding(projectId: string, workspace: string | undefined, vaul
   } catch (error) {
     return { reason_code: 'canonical_path_unavailable', reason: `Canonical path check failed: ${failure(error)}` };
   }
+  /**
+   * Return whether two canonical paths are equal under platform path-relative comparison.
+   */
   const same = (a: string, b: string) => path.relative(a, b) === '';
   let rootPath: string;
   try { rootPath = fs.realpathSync.native(LOCAL_FIXED_ROOT); }
@@ -56,6 +62,9 @@ function localSelfBinding(projectId: string, workspace: string | undefined, vaul
 }
 
 type Options = { project: string; workspace?: string; vault?: string; handoff?: string };
+/**
+ * Parse explicit project, workspace, vault and named-handoff arguments; reject duplicates/missing values and never select a newest project.
+ */
 export function parseArgs(argv: string[]): Options {
   const values: Record<string, string> = {};
   for (let i = 0; i < argv.length; i += 2) {
@@ -66,6 +75,9 @@ export function parseArgs(argv: string[]): Options {
   if (!values['--project']) throw Error('--project <confirmed project_id> required; no latest-project fallback');
   return { project: values['--project'], workspace: values['--workspace'], vault: values['--vault'], handoff: values['--handoff'] };
 }
+/**
+ * Return a bounded Error message for reader diagnostics or a generic unavailable message for non-Error failures.
+ */
 function failure(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 500) : 'Rule reader unavailable';
 }
@@ -78,6 +90,15 @@ export type PreferenceAuthorization = {
   source_ref: string; owner?: string;
   application: { artifact: string; sha256: string };
 };
+/**
+ * Read advisory preferences only for an approved exact project scope, validating time, content hash, trusted grants, owner, provenance and reviewed application evidence.
+ * @param {string} vault Local vault path.
+ * @param {string} projectId Verified checkpoint project identity.
+ * @param {object} project Resolved project-rule binding/status.
+ * @param {string} source Existing OSB source checkout used for read modules.
+ * @param {readonly PreferenceAuthorization[]} authorizations Trusted host grants, never inferred from notes or checkpoint data.
+ * @returns {Promise<object>} Advisory items and withholding counts; unsafe or unavailable readers fail closed without loading broad recall.
+ */
 async function readLearnedPreferences(vault: string, projectId: string, project: any,
   source: string, authorizations: readonly PreferenceAuthorization[]) {
   const result: any = { status: 'not_loaded', data_class: 'learned_preference', authority: 'advisory',
@@ -85,8 +106,14 @@ async function readLearnedPreferences(vault: string, projectId: string, project:
   if (!['loaded', 'missing'].includes(project.status) || !project.resolved_scope) {
     return { ...result, reason_code: 'project_binding_unavailable' };
   }
+  /**
+   * Increment the withholding count for a stable validation reason in the current preference-read result.
+   */
   const hold = (reason: string) => { result.withheld[reason] = (result.withheld[reason] || 0) + 1; };
   try {
+    /**
+     * Import the named existing OSB reader module relative to the currently selected source directory; no module installation is performed.
+     */
     const load = (file: string) => import(pathToFileURL(path.join(source, 'src', 'core', file)).href);
     const [collection, preference, hashes, origins, signals, evidence, paths, safety, frontmatter] = await Promise.all([
       load('brain/preferences-collect.ts'), load('brain/preference.ts'), load('brain/content-hash.ts'),
@@ -94,6 +121,9 @@ async function readLearnedPreferences(vault: string, projectId: string, project:
       load('brain/paths.ts'), load('path-safety.ts'), load('vault.ts'),
     ]);
     const dirs = paths.brainDirs(vault);
+    /**
+     * Resolve a vault-relative regular source or requested directory, rejecting parent traversal, symlinks and canonical escapes before reading.
+     */
     const safe = (relative: string, directory = false): string => {
       if (typeof relative !== 'string' || !relative || path.isAbsolute(relative) ||
           relative.split(/[\\/]/).some(part => part === '..') ||
@@ -107,6 +137,9 @@ async function readLearnedPreferences(vault: string, projectId: string, project:
       if (stat.isSymbolicLink() || !(directory ? stat.isDirectory() : stat.isFile())) throw Error('Not a regular local source');
       return file;
     };
+    /**
+     * Return a verified local source directory or null when absent; propagate unsafe or unreadable-directory errors.
+     */
     const localDir = (dir: string) => {
       try { return safe(path.relative(vault, dir), true); }
       catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
@@ -116,6 +149,9 @@ async function readLearnedPreferences(vault: string, projectId: string, project:
     const files = collection.listPreferenceFiles(directory);
     result.scanned = files.length;
     const now = Date.now();
+    /**
+     * Parse a strict real UTC timestamp into milliseconds, returning NaN for malformed or normalized calendar values.
+     */
     const instant = (value: unknown) => typeof value === 'string' &&
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value) &&
       Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 19) === value.slice(0, 19)
@@ -211,6 +247,12 @@ async function readLearnedPreferences(vault: string, projectId: string, project:
     return { ...result, status: 'unavailable', items: [], reason_code: 'preference_reader_unavailable' };
   }
 }
+/**
+ * Resolve an explicit checkpoint first, then attach own continuation, approved global/project rules and separately authorized advisory preferences.
+ * @param {Options} options Explicit project and optional actual workspace, local vault and exact named handoff.
+ * @param {readonly PreferenceAuthorization[]} [authorizations] Trusted host preference grants; default grants nothing.
+ * @returns {Promise<object>} Checkpoint, continuation and rule-class statuses with errors/truncation preserved; uses existing readers and performs no preference promotion.
+ */
 export async function resumeWithRules(options: Options, authorizations: readonly PreferenceAuthorization[] = []) {
   if (!options.project) throw Error('--project <confirmed project_id> required; no latest-project fallback');
   const vault = path.resolve(options.vault || 'C:\\TheHive');
@@ -234,6 +276,9 @@ export async function resumeWithRules(options: Options, authorizations: readonly
   const source = path.resolve(process.env.OSB_SOURCE || path.join(os.homedir(), 'projects', 'open-second-brain'));
   let readers;
   try {
+    /**
+     * Import the named existing OSB reader module relative to the currently selected source directory; no module installation is performed.
+     */
     const load = (file: string) => import(pathToFileURL(path.join(source, 'src', 'core', 'brain', file)).href);
     const [standing, identity, scoped] = await Promise.all([
       load('standing-rules.ts'), load('scope-identity.ts'), load('scoped-rules.ts'),

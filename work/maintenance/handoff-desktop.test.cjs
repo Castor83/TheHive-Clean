@@ -1,8 +1,17 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
 const {saveCheckpoint}=require('./handoff-store.cjs');
+/**
+ * Run the adapter with an injected app and isolated policy disabling live automation/navigation; synthetic creation remains available to the fake app.
+ */
 const ensureSuccessor=(input,options)=>isolatedAdapter({home:options.codexHome,app:options.app},{enabled:false,navigate:false}).ensureSuccessor(input,options);
+/**
+ * Return the SHA-256 of fixture bytes for controlled integrity assertions.
+ */
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+/**
+ * Create synthetic checkpoints, transcript copies and a counted fake app transport in temporary directories; return controls for identity, visibility and failure scenarios.
+ */
 function fixture(t,{session=crypto.randomUUID(),checkpointSession=session,central=false,sharedRoot,projectId='Fixture',checkpointWorkspace=false,checkpointRepository=false,bindTask=true,inheritedReview=false}={}){
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'thehive-desktop-fixture-'));
   t.after(()=>{assert.ok(path.resolve(dir).startsWith(path.resolve(os.tmpdir())+path.sep));fs.rmSync(dir,{recursive:true,force:true});});
@@ -185,6 +194,9 @@ test('the origin lock remains held while an unknown result is reconciled',async 
   assert.equal(second.status,'fallback_required');assert.equal(f.creates(),1);
 });
 
+/**
+ * Evaluate the adapter with injected policy/filesystem/process/app fixtures; optional CLI mode captures stdin/stdout without contacting the live desktop.
+ */
 function isolatedAdapter(f,policy,{cli=false,realpathSync,callerSessionId}={}){
   const adapter=path.join(__dirname,'handoff-desktop.cjs'),policyFile=path.join(__dirname,'handoff-automation-policy.json');
   const policyFs={...fs,...(realpathSync?{realpathSync}:{}),statSync(file,...args){if(path.resolve(file)===policyFile)return {size:Buffer.byteLength(JSON.stringify(policy))};return fs.statSync(file,...args);},readFileSync(file,options){
@@ -193,11 +205,17 @@ function isolatedAdapter(f,policy,{cli=false,realpathSync,callerSessionId}={}){
   }};
   const module={exports:{}},stdin=new (require('node:stream').PassThrough)();let output='',exitCode;
   const processFake={platform:process.platform,env:{CODEX_HOME:f.home,...(callerSessionId?{CODEX_THREAD_ID:callerSessionId}:{})},argv:['node',adapter],stdin,stdout:{write(chunk,done){output+=chunk;if(done)done();return true;}},exit(code){exitCode=code;},exitCode:undefined};
+  /**
+   * Return injected filesystem/app modules and delegate other dependencies while evaluating the isolated adapter.
+   */
   function localRequire(name){if(name==='node:fs')return policyFs;if(name==='./codex-app-pipe.cjs')return f.app;return require(name);}
   localRequire.main=cli?module:{};
   new Function('require','module','__dirname','process',fs.readFileSync(adapter,'utf8'))(localRequire,module,__dirname,processFake);
   return {...module.exports,async run(body){stdin.end(body);await new Promise(resolve=>setTimeout(resolve,100));return {output,exitCode};}};
 }
+/**
+ * Return the exact fixture project/workspace/store binding accepted by the injected adapter.
+ */
 const bindingFor=f=>({Fixture:{workspace:f.input.cwd,handoff_root:f.root}});
 
 test('manual review accepts equivalent local path separators but rejects another file or hash',async t=>{
@@ -508,7 +526,13 @@ test('stdin cannot enable a paused operator policy or inject project bindings',a
   assert.deepEqual(JSON.parse(result.output||'null'),{status:'fallback_required'});assert.equal(f.creates(),0);
 });
 
+/**
+ * Return an enabled all-local-projects fixture policy bound to this temporary handoff root.
+ */
 const globalPolicy=f=>({enabled:true,navigate:true,cancel_on_new_user_message:true,scope:'all_local_projects',handoff_root:f.root});
+/**
+ * Return the fixture policy with freshness cancellation and takeover archival enabled while navigation stays disabled.
+ */
 const conditionalPolicy=f=>({...globalPolicy(f),navigate:false,cancel_on_new_user_message:true,archive_after_takeover:true});
 
 test('busy origin schedules completion; verified uptake survives later project checkpoints',async t=>{
@@ -542,6 +566,9 @@ for(const fault of ['new_message','proof_changed','missing_uptake','wrong_caller
   await adapter.ensureSuccessor({...input,operation:'resume_archive',caller_session_id:fault==='wrong_caller'?crypto.randomUUID():f.child},{app:f.app,codexHome:f.home});
   assert.equal(f.archives(),0);assert.equal(f.creates(),1);
 });
+/**
+ * Append one synthetic user record to the fixture transcript to invalidate its saved freshness boundary.
+ */
 const appendUser=f=>fs.appendFileSync(f.source,JSON.stringify({type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text:'New offline user request'}]}})+'\n');
 
 test('a persisted message arriving during archive is followed by one restoration of the origin',async t=>{
@@ -595,6 +622,9 @@ test('acceptance: new message stops automation then explicit manual takeover ret
   assert.equal((await adapter.ensureSuccessor(f.input,{app:f.app,codexHome:f.home})).reason_code,'new_user_message_after_snapshot');
   assert.equal(f.creates(),0);assert.equal(f.archives(),0);
   const manualFile=path.join(__dirname,'handoff-manual-start.cjs'),mod={exports:{}};
+  /**
+   * Return injected filesystem/app modules and delegate other dependencies while evaluating the isolated adapter.
+   */
   const localRequire=name=>name==='./codex-app-pipe.cjs'?f.app:require(name);
   localRequire.main={};
   new Function('require','module','process',fs.readFileSync(manualFile,'utf8'))(localRequire,mod,{env:{CODEX_THREAD_ID:f.child,CODEX_HOME:f.home},cwd:()=>f.input.cwd});
@@ -780,6 +810,9 @@ test('manual successor receives the inherited numbered original title',async t=>
   assert.equal((await adapter.ensureSuccessor(f.input,{app:f.app,codexHome:f.home})).reason_code,'new_user_message_after_snapshot');
   assert.equal(f.creates(),0);assert.equal(f.archives(),0);
   const manualFile=path.join(__dirname,'handoff-manual-start.cjs'),mod={exports:{}};
+  /**
+   * Return injected filesystem/app modules and delegate other dependencies while evaluating the isolated adapter.
+   */
   const localRequire=name=>name==='./codex-app-pipe.cjs'?f.app:require(name);
   localRequire.main={};
   new Function('require','module','process',fs.readFileSync(manualFile,'utf8'))(localRequire,mod,{env:{CODEX_THREAD_ID:f.child,CODEX_HOME:f.home},cwd:()=>f.input.cwd});

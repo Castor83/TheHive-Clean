@@ -5,7 +5,13 @@ const net=require('node:net');
 const crypto=require('node:crypto');
 const {listTools,callAppTool,decodeToolResult}=require('./codex-app-pipe.cjs');
 const fixtureTool={name:'list_projects',namespace:'codex_app',inputSchema:{type:'object'}};
+/**
+ * Encode a synthetic JSON-RPC value as a four-byte little-endian length plus UTF-8 JSON bytes.
+ */
 function frame(value){const b=Buffer.from(JSON.stringify(value));const h=Buffer.alloc(4);h.writeUInt32LE(b.length);return Buffer.concat([h,b]);}
+/**
+ * Listen on a unique temporary named pipe, dispatch complete request frames to handler and close the server after the test; never uses the real app pipe.
+ */
 async function fixture(t,handler){
   const pipe='\\\\.\\pipe\\thehive-offline-fixture-'+crypto.randomUUID();
   const server=net.createServer(socket=>{

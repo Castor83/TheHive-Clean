@@ -1,8 +1,17 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os'),crypto=require('node:crypto');
 const store=require('./handoff-store.cjs');
+/**
+ * Create an isolated workspace/store with two session UUIDs and guarded test cleanup; return both identities and local paths.
+ */
 function fixture(t){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'hive-chat-task-'));t.after(()=>{assert.equal(path.dirname(dir),fs.realpathSync(os.tmpdir()));fs.rmSync(dir,{recursive:true,force:true});});const root=path.join(dir,'work','handoff'),a=crypto.randomUUID(),b=crypto.randomUUID();return {dir,root,a,b};}
+/**
+ * Return a synthetic next-step assignment with the supplied text and exact-work success criterion.
+ */
 const step=text=>({text,success_criterion:'Exact assigned work only'});
+/**
+ * Save a fixture checkpoint for one session and parent, optionally binding its own explicit task independently of the common project next action.
+ */
 function save(f,session,parent,task){return store.saveCheckpoint(f.root,{format_version:1,project_id:'Fixture',session_id:session,expected_parent:parent,...(task?{chat_task:{source_ref:'human_'+session,next_step:step(task)}}:{}),patch:{goal:'Shared project',status:'planned',last_section:'Progress',git:{workspace:f.dir},sources:{['human_'+session]:{session_ref:session}},next_step:step('COMMON PROJECT TASK MUST NOT BECOME A CHAT ORDER')}});}
 test('A and B retain distinct orders after alternating writes in one project',t=>{
  const f=fixture(t),a=save(f,f.a,null,'Analyse costs'),b=save(f,f.b,a.checkpoint_id,'Fix hooks');
@@ -35,6 +44,9 @@ test('connected two-chat flow preserves each assignment through starters, takeov
  const policy={enabled:true,scope:'all_local_projects',handoff_root:f.root,navigate:true,wait_for_origin_idle:true,cancel_on_new_user_message:true,archive_after_takeover:true};
  const source=path.join(__dirname,'handoff-desktop.cjs'),policyFile=path.join(__dirname,'handoff-automation-policy.json'),m={exports:{}};
  const mockFs={...fs,statSync(p,...args){if(path.resolve(p)===policyFile)return {size:Buffer.byteLength(JSON.stringify(policy))};return fs.statSync(p,...args);},readFileSync(p,opts){if(path.resolve(p)===policyFile)return opts==='utf8'?JSON.stringify(policy):Buffer.from(JSON.stringify(policy));return fs.readFileSync(p,opts);}};
+ /**
+  * Substitute the fixture filesystem while delegating other module loads; policy reads use the controlled fixture.
+  */
  const req=name=>name==='node:fs'?mockFs:require(name);req.main={};
  new Function('require','module','__dirname','process',fs.readFileSync(source,'utf8'))(req,m,__dirname,process);
  const app={listTools:async()=>['list_projects','list_threads','read_thread','create_thread','navigate_to_codex_page','set_thread_archived'].map(name=>({name,namespace:'fixture'})),decodeToolResult:x=>x,callAppTool:async({tool,args})=>{
@@ -46,6 +58,9 @@ test('connected two-chat flow preserves each assignment through starters, takeov
    if(tool.name==='set_thread_archived'){archived.push(args.threadId);return {threadId:args.threadId,archived:true};}
    throw Error('Unsupported real-app contract');
  }};
+ /**
+  * Return the SHA-256 of synthetic snapshot bytes used by this regression fixture.
+  */
  const digest=b=>crypto.createHash('sha256').update(b).digest('hex');
  for(const [session,expected]of [[f.a,'Analyse costs'],[f.b,'Fix hooks']]){
    const own=store.resumeChatContinuation(f.root,{session_id:session,workspace:f.dir}),dir=path.join(home,'handoff-snapshots',session,'bound');fs.mkdirSync(dir,{recursive:true});

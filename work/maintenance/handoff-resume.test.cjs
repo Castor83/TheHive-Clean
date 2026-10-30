@@ -10,7 +10,13 @@ const { saveCheckpoint } = require('./handoff-store.cjs');
 const bun = path.join(os.homedir(), '.bun', 'bin', 'bun.exe');
 const script = path.join(__dirname, 'handoff-resume.ts');
 
+/**
+ * Create parent directories and write fixture bytes at the supplied temporary path.
+ */
 function put(file, bytes) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes); }
+/**
+ * Recursively record fixture file hashes and symlink targets to detect persistent writes during reader calls.
+ */
 function manifest(dir) {
   const out = {};
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -21,6 +27,9 @@ function manifest(dir) {
   }
   return out;
 }
+/**
+ * Create a temporary sourced checkpoint plus distinct global/project/foreign rules and an unapproved preference for scope-isolation assertions.
+ */
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'thehive-resume-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -38,6 +47,9 @@ function fixture(t) {
   put(path.join(vault, 'Brain', 'preferences', 'pref-do-not-load.md'), 'NOT_SCOPE_BOUND_PREFERENCE\n');
   return { dir, vault, workspace, saved };
 }
+/**
+ * Spawn the existing Bun resume CLI against the fixture project/workspace/vault with optional arguments and environment; return its bounded process result.
+ */
 function run(f, extras = [], env = {}) {
   return spawnSync(bun, ['run', script, '--project', 'TheHive', '--workspace', f.workspace, '--vault', f.vault, ...extras], {
     encoding: 'utf8', windowsHide: true, env: { ...process.env, ...env }, timeout: 30000,
@@ -121,6 +133,9 @@ test('existing OSB reader truncation is retained in the result', t => {
 // New self-binding cases run only with --test-name-pattern="local fixed self-binding".
 // The fixture adapter changes the approved ROOT CONSTANT in an isolated copy;
 // production has no option/environment override for that authorization.
+/**
+ * Create an isolated vault and adapt only the fixed-root constant in a temporary reader copy; preserve production authorization and register verified cleanup.
+ */
 function selfFixture(t, projectId = 'TheHive') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'thehive-self-binding-'));
   const realDir = fs.realpathSync.native(dir);
@@ -152,6 +167,9 @@ function selfFixture(t, projectId = 'TheHive') {
   put(fixtureScript, adapted);
   return { dir, vault, saved, fixtureScript };
 }
+/**
+ * Run the selected fixture or production reader with explicit project/workspace/vault options; assert CLI success and return parsed output.
+ */
 function selfRun(f, { project = f.saved.project_id, workspace = f.vault, vault = f.vault, actualAdapter = false } = {}) {
   const argv = ['run', actualAdapter ? script : f.fixtureScript, '--project', project, '--vault', vault];
   if (workspace !== null) argv.push('--workspace', workspace);
@@ -267,6 +285,9 @@ test('local fixed self-binding preserves external pointer workspaces and their e
 
 // Breaks caught: guessing human permission from status/scope, dropping source or
 // application checks, broad recall, and turning advisory data into operator rules.
+/**
+ * Create synthetic confirmed preference, signal provenance, successful application log and matching trusted grant; allow deliberate metadata changes.
+ */
 function preferenceFixture(t, changes = {}) {
   const f = selfFixture(t);
   const principle = 'FIXTURE_ONLY: cite the checked project artifact.';
@@ -296,11 +317,20 @@ function preferenceFixture(t, changes = {}) {
       sha256: crypto.createHash('sha256').update('Isolated reviewed fixture result.\n').digest('hex') } };
   return f;
 }
+/**
+ * Serialize defined fixture metadata as JSON-valued YAML frontmatter for existing OSB parsers.
+ */
 function fixtureMarkdown(meta) {
   return '---\n' + Object.entries(meta).filter(([, v]) => v !== undefined)
     .map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join('\n') + '\n---\n';
 }
+/**
+ * Write the fixture current preference metadata to its temporary preference file.
+ */
 function writeFixturePreference(f) { put(f.preferenceFile, fixtureMarkdown(f.pref)); }
+/**
+ * Write a temporary caller supplying explicit trusted grants, invoke Bun and require all reader-visible fixture files to remain unchanged.
+ */
 function preferenceRun(f, grants = [f.grant], workspace = f.vault) {
   const caller = path.join(f.dir, 'preference-caller.ts');
   put(caller, `import { resumeWithRules } from ${JSON.stringify(f.fixtureScript)};\n` +

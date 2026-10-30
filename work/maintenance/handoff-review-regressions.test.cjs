@@ -7,6 +7,9 @@ const path = require('node:path');
 const {spawn, spawnSync} = require('node:child_process');
 const {once} = require('node:events');
 const store = require('./handoff-store.cjs');
+/**
+ * Create and return an isolated temporary handoff root with test cleanup for lock recovery regressions.
+ */
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hive-review-'));
   t.after(() => fs.rmSync(root, {recursive:true, force:true}));

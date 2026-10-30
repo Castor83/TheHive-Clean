@@ -7,6 +7,9 @@ const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const os = require('node:os');
 
+/**
+ * Parse one explicit JSONL session and importer format; require separate user-turn-storage consent and preview hash for apply.
+ */
 function parseArgs(argv) {
   const options = { apply: false, acceptUserTurnStorage: false };
   const flags = new Set(['--apply', '--accept-user-turn-storage']);
@@ -32,6 +35,9 @@ function parseArgs(argv) {
   return options;
 }
 
+/**
+ * Hash one regular non-symlink JSONL session up to 128 MiB using bounded reads; always close the source descriptor.
+ */
 function fingerprint(file) {
   const lstat = fs.lstatSync(file);
   if (!lstat.isFile() || lstat.isSymbolicLink()) throw Error('Nur echte Einzeldateien erlaubt; keine Verzeichnisse oder Links');
@@ -47,6 +53,9 @@ function fingerprint(file) {
   } finally { fs.closeSync(fd); }
 }
 
+/**
+ * Build the existing OSB importer command with user-only preference extraction and preserved event times; dry-run is default and no command is executed here.
+ */
 function buildInvocation(opts, home = os.homedir()) {
   const root = process.env.THEHIVE_ROOT || 'C:\\TheHive';
   const source = process.env.OSB_SOURCE || path.win32.join(home, 'projects', 'open-second-brain');
@@ -61,6 +70,12 @@ function buildInvocation(opts, home = os.homedir()) {
   };
 }
 
+/**
+ * Fingerprint one session, invoke the existing importer with a timeout, validate its isolated report and recheck the unchanged source.
+ * @param {object} opts Explicit session, format and optional apply consent/hash.
+ * @param {Function} [spawn] Injectable synchronous process runner, defaulting to spawnSync.
+ * @returns {object} Preview or applied counts and source hash; no Dream or subsequent model extraction is started.
+ */
 function execute(opts, spawn = spawnSync) {
   const file = path.resolve(opts.session);
   const before = fingerprint(file);

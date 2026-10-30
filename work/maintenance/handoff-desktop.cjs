@@ -2,14 +2,41 @@
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const {resumeProject,resumeBoundCheckpoint,chatTaskForCheckpoint}=require('./handoff-store.cjs');
 const UUID=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+/**
+ * Return hexadecimal SHA-256 bytes for snapshot, history and journal binding checks.
+ */
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+/**
+ * Return whether a value names a fully qualified local path supported by this platform, excluding NUL and network forms.
+ */
 function localPath(file){return typeof file==='string'&&!file.includes('\0')&&(/^[a-z]:[\\/]/i.test(file)||/^\\\\\?\\[a-z]:\\/i.test(file)||(process.platform!=='win32'&&file.startsWith('/')&&!file.startsWith('//')&&!file.startsWith('/\\')));}
+/**
+ * Resolve a validated local path and require its canonical target to remain local.
+ */
 function real(file){if(!localPath(file))throw Error('Fully qualified local path required');const resolved=fs.realpathSync(file);if(!localPath(resolved))throw Error('Local realpath required');return resolved;}
+/**
+ * Return whether a candidate equals root or is lexically contained beneath it without escaping through a relative parent.
+ */
 function inside(file,root){const r=path.relative(root,file);return r===''||(!r.startsWith('..'+path.sep)&&r!=='..'&&!path.isAbsolute(r));}
+/**
+ * Read bounded JSON metadata up to 4 MiB, tolerating a BOM; propagate invalid JSON and filesystem errors.
+ */
 function read(file){if(fs.statSync(file).size>4*1024*1024)throw Error('Oversized metadata');return JSON.parse(fs.readFileSync(file,'utf8').replace(/^\uFEFF/,''));}
+/**
+ * Exclusively create and fsync a unique JSON temporary file, then rename it over the journal/proof target.
+ */
 function write(file,value){const tmp=file+'.'+crypto.randomUUID()+'.tmp';const fd=fs.openSync(tmp,'wx');try{fs.writeFileSync(fd,JSON.stringify(value,null,2)+'\n');fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(tmp,file);}
+/**
+ * Verify a named snapshot copy remains within its directory and matches manifest name, byte count and hash; return the canonical file path.
+ */
 function copied(dir,entry,name){const file=real(path.join(dir,name));if(entry?.file!==name||!inside(file,dir)||fs.statSync(file).size!==entry.bytes||entry.bytes>128*1024*1024||hash(fs.readFileSync(file))!==entry.sha256)throw Error('Snapshot copy mismatch');return file;}
+/**
+ * Resolve camelCase/snake_case journal identity fields and throw when both exist with conflicting values.
+ */
 function alias(state,camel,snake){const a=state[camel],b=state[snake];if(a!=null&&b!=null&&a!==b)throw Error('Conflicting journal identity');return a??b;}
+/**
+ * Follow bounded, hashed project ancestry until the exact origin checkpoint is found and require its working Markdown to match; throw on foreign or missing history.
+ */
 function verifyOriginSnapshot(root,current,manifest,working,session){
   const history=path.join(root,current.project_id,'history'),resolvedHistory=real(history);
   if(!inside(resolvedHistory,root))throw Error('History escaped handoff root');
@@ -29,6 +56,9 @@ function verifyOriginSnapshot(root,current,manifest,working,session){
   }
   throw Error('Origin ancestry exceeds local bound');
 }
+/**
+ * Find a requested uptake checkpoint through bounded hashed project ancestry; return the matching record or reject invalid/missing parents.
+ */
 function uptakeAncestor(root,current,id){
   const history=real(path.join(root,current.project_id,'history'));
   for(let depth=0;depth<128;depth++){
@@ -42,6 +72,12 @@ function uptakeAncestor(root,current,id){
   }
   throw Error('Uptake ancestry exceeds bound');
 }
+/**
+ * Coordinate one journal-locked successor creation/recovery or controlled takeover using exact local project/session/snapshot bindings and persistent freshness checks.
+ * @param {object} input Bound origin/turn/workspace/snapshot plus optional completion operation and successor identity.
+ * @param {object} [options] Existing app transport or offline adapter, Codex home, time budget, bindings and pending-job scheduler.
+ * @returns {Promise<object>} Explicit successor, waiting, archive or fallback outcome; may write journals/proof, call desktop tools and schedule a bounded completion worker.
+ */
 async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings,schedulePending}={}){
   let lock,nonce,journal,state,knownSuccessorId,pendingJob;
   try{
@@ -140,6 +176,9 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
     }
     if(reopeningSuccessor&&(successor!==reopeningSuccessor||(!['takeover_verified','archived_after_takeover'].includes(state.phase)&&!(confirming&&['successor_created','successor_visible'].includes(state.phase)))||state.checkpointId!==originSnapshot.checkpoint_id||state.project_id!==originSnapshot.project_id))throw Error('Takeover journal changed');
     state={...state,originThreadId:origin,successorThreadId:successor,projectId};
+    /**
+     * Persist a journal phase and extra metadata after checking concurrent identity bindings; preserve verified takeover/archive phases and return successor status.
+     */
     const save=(phase,extra={})=>{
       if(fs.existsSync(journal)){
         const latest=read(journal);
@@ -160,6 +199,9 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
       if(state.successorThreadId)knownSuccessorId=state.successorThreadId;
       return {status:phase,successor_thread_id:state.successorThreadId||null};
     };
+    /**
+     * Check the first snapshot boundary or reviewed manual boundary; persist automatic cancellation on newer/unverifiable input and return a blocking result, otherwise null.
+     */
     function fresh(){
       if(operatorPolicy.cancel_on_new_user_message!==true)return null;
       // Explicitly user-started successors have a separate boundary. Never
@@ -192,14 +234,26 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
     if(!allLocal&&!knownSuccessorId&&uncertain&&state.reconciliationAttemptedAt)return {status:state.phase==='creation_pending'?'creation_pending':'creation_unknown',successor_thread_id:null};
     if(!Number.isInteger(timeoutMs)||timeoutMs<1||timeoutMs>60000)throw Error('Invalid desktop time budget');
     const deadline=performance.now()+timeoutMs;
+    /**
+     * Return milliseconds left in the shared desktop deadline; throw once the bounded budget is exhausted.
+     */
     const remaining=()=>{const ms=Math.floor(deadline-performance.now());if(ms<1)throw Error('Desktop time budget exhausted');return ms;};
+    /**
+     * Run an asynchronous start callback within the remaining desktop deadline and clear its rejection timer on settlement.
+     */
     async function bounded(start){
       const ms=remaining();let timer;
       try{return await Promise.race([Promise.resolve().then(()=>start(remaining())),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Desktop time budget exhausted')),ms);})]);}
       finally{clearTimeout(timer);}
     }
     const tools=await bounded(ms=>app.listTools({timeoutMs:ms}));
+    /**
+     * Find an existing tool by name, bind the correct actual caller/turn and invoke/decode it within the shared desktop deadline.
+     */
     async function call(name,args){const tool=tools.find(t=>t.name===name);if(!tool)throw Error('Required existing app tool unavailable');return app.decodeToolResult(await bounded(ms=>app.callAppTool({tool,args,threadId:resumingCreation?creationCaller:resuming?input.caller_session_id:confirming?input.successor_session_id:input.session_id,turnId:input.turn_id,callId:crypto.randomUUID(),timeoutMs:ms})));}
+    /**
+     * Read app projects and require exactly one local project whose canonical workspace matches the caller; return that project row.
+     */
     async function exactProject(){
       const projects=(await call('list_projects',{})).projects||[];
       const matches=projects.filter(p=>{
@@ -217,6 +271,9 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
       if(state.successorThreadId)knownSuccessorId=state.successorThreadId;
       if(!knownSuccessorId&&uncertain&&state.reconciliationAttemptedAt)return {status:state.phase==='creation_pending'?'creation_pending':'creation_unknown',successor_thread_id:null};
     }
+    /**
+     * Attempt a bounded status-title update once per journaled thread/label pair when enabled; persist the attempt and tolerate display failures.
+     */
     async function visibleNotice(label,threadId=input.session_id){
       if(operatorPolicy.visible_notice!==true||!tools.some(t=>t.name==='set_thread_title'))return;
       const key=threadId+':'+label;
@@ -260,6 +317,9 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
       }
       const afterIdle=fresh();if(afterIdle)return afterIdle;
     }
+    /**
+     * Persist a successor phase, recheck freshness, announce availability and conditionally navigate once per turn; preserve explicit failure and pending-worker outcomes.
+     */
     async function finish(phase,extra={}){
       const result=save(phase,extra);
       const blocked=fresh();if(blocked)return blocked;
@@ -285,12 +345,18 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
       }
       return result;
     }
+    /**
+     * Read a bounded desktop catalog and return pinned plus ordinary thread rows for identity reconciliation.
+     */
     const threads=async()=>{const r=await call('list_threads',{limit:50});return [...(r.pinnedThreads||[]),...(r.threads||[])];};
     if(confirming){
       if(operatorPolicy.cancel_on_new_user_message!==true||operatorPolicy.archive_after_takeover!==true)throw Error('Guarded uptake completion unavailable');
       if(!project)project=await exactProject();
       if(project.projectId!==state.projectId)throw Error('Uptake app project mismatch');
       const catalog=await threads();
+      /**
+       * Return whether a thread ID belongs to the exact app project, allowing only the verified manual-move acknowledgement fallback.
+       */
       const belongs=(id)=>catalog.some(t=>(t.threadId||t.id)===id&&(t.projectId===project.projectId||
         (state.manualAuthorization&&require('./handoff-manual-start.cjs').manualProjectMatches(t,state.manualAuthorization,project.projectId,cwd))));
       if(!belongs(input.successor_session_id))throw Error('Successor not in exact app project');
@@ -344,6 +410,9 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
       return save('archived_after_takeover',{archivedAt:new Date().toISOString()});
     }
     const title=cp.project_id+' – Fortsetzung '+input.session_id;
+    /**
+     * Make at most one persisted catalog reconciliation after an uncertain creation; reuse one exact successor and never issue another create.
+     */
     async function reconcile(){
       const phase=state.phase==='creation_pending'?'creation_pending':'creation_unknown';
       if(state.reconciliationAttemptedAt)return {status:phase,successor_thread_id:null};
@@ -388,6 +457,12 @@ async function ensureSuccessorCore(input,{app,codexHome,timeoutMs=10000,bindings
     }catch{/* Missing completion receipt leaves the existing manual recovery intact. */}}
   }
 }
+/**
+ * Dispatch explicit manual-offer requests or guarded desktop transfer; attach a bound local manual offer to eligible fallback/waiting outcomes.
+ * @param {object} input Actual origin and transfer operation context.
+ * @param {object} [options] Existing adapter options forwarded to the guarded implementation.
+ * @returns {Promise<object>} Transfer result with optional manual recovery URL/file; failed offers do not override the original outcome.
+ */
 async function ensureSuccessor(input,options={}){
   if(input?.operation==='offer_manual_start'){
     try{return {status:'fallback_required',successor_thread_id:null,reason_code:'announcement_required',...require('./handoff-manual-start.cjs').offerManualStart(input,options)};}
@@ -402,6 +477,9 @@ async function ensureSuccessor(input,options={}){
 module.exports={ensureSuccessor};
 if(require.main===module){
   let chunks=[],bytes=0,done=false;
+  /**
+   * Write one JSON CLI result and exit after stdout flush; ignore later completion/error attempts.
+   */
   const emit=result=>{if(done)return;done=true;process.stdout.write(JSON.stringify(result)+'\n',()=>process.exit(0));};
   process.stdin.on('error',()=>emit({status:'fallback_required'}));
   process.stdin.on('data',chunk=>{if(done)return;bytes+=chunk.length;if(bytes>65536){chunks=[];emit({status:'fallback_required'});return;}chunks.push(chunk);});

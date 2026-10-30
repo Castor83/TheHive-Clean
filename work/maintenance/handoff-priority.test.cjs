@@ -6,6 +6,9 @@ const path = require('node:path');
 const os = require('node:os');
 const {saveCheckpoint,resumeProject} = require('./handoff-store.cjs');
 
+/**
+ * Create a temporary sourced checkpoint with an unfinished wait task and prerequisite task; return the store, envelope and saved parent.
+ */
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(),'thehive-priority-'));
   t.after(() => {
@@ -18,6 +21,9 @@ function fixture(t) {
       next_step:{text:'Wait for natural event',task_id:'waiting',success_criterion:'Real event'}}};
   return {root,base,first:saveCheckpoint(root,base)};
 }
+/**
+ * Build a sourced priority-event patch that defers the original task without claiming its completion.
+ */
 function redirect(first) {
   const next = {text:'Activate prerequisite',task_id:'activate',success_criterion:'Real activation',redirect_event:'priority_1'};
   return {next_step:next,events:{priority_1:{type:'next_action_reprioritized',previous:first.state.next_step,replacement:next,

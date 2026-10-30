@@ -2,6 +2,9 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const {manualProjectMatches}=require('./handoff-manual-start.cjs');
 const cwd=__dirname,session='10203040-1122-3344-5566-778899aabbcc',project='exact-project';
+/**
+ * Return a local successor catalog row with null project membership and its exact synthetic move acknowledgement.
+ */
 function fixture(){return {row:{threadId:session,kind:'codex',hostId:'local',cwd,projectId:null},authorization:{successor_session_id:session,project_binding:{type:'app_move_acknowledgement',source:'codex',threadId:session,hostId:'local',projectId:project,workspace:cwd}}};}
 test('manual membership uses exact move acknowledgement when catalog still has null',()=>{
  const f=fixture();assert.equal(manualProjectMatches(f.row,f.authorization,project,cwd),true);

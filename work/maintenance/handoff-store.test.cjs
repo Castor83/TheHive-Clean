@@ -7,12 +7,21 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const { saveCheckpoint, resumeProject } = require('./handoff-store.cjs');
+/**
+ * Return the SHA-256 of fixture bytes for controlled integrity assertions.
+ */
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+/**
+ * Create a temporary handoff root and register recursive cleanup with the test context; return its path.
+ */
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'thehive-handoff-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   return root;
 }
+/**
+ * Return a fresh sourced version-1 save envelope with open tasks and explicit no-model authorization for storage regressions.
+ */
 function input() {
   return { format_version: 1, project_id: 'TheHive', session_id: 'session-one', expected_parent: null,
     patch: { goal: 'Implement checkpoint storage', status: 'implemented', last_section: 'A3',

@@ -7,18 +7,36 @@ const HEADINGS = ['STATUS', 'DECISIONS', 'RECENT_CHANGES', 'COMPLETED', 'NEXT_AC
 const META = ['schema_version', 'project_id', 'scope', 'session_id', 'checkpoint_id',
   'parent_checkpoint_id', 'updated_at', 'status', 'source_refs'];
 const STATUSES = new Set(['planned', 'implemented', 'tested', 'verified', 'blocked', 'in_progress']);
+/**
+ * Return whether a value is a non-null keyed object rather than an array.
+ */
 const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+/**
+ * Return recursively key-sorted JSON data for deterministic rendering; preserve array order and scalar values.
+ */
 function ordered(value) {
   if (Array.isArray(value)) return value.map(ordered);
   if (isObject(value)) return Object.fromEntries(Object.keys(value).sort().map(k => [k, ordered(value[k])]));
   return value;
 }
+/**
+ * Serialize a value with deterministic object key order for comparison and Markdown details.
+ */
 const json = value => JSON.stringify(ordered(value));
+/**
+ * Convert an optional value to trimmed single-line text, collapsing whitespace for Markdown summaries.
+ */
 const inline = value => String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+/**
+ * Return whether a string, array or keyed object contains evidence content; does not independently verify that content.
+ */
 function evidence(value) {
   return typeof value === 'string' ? value.trim().length > 0 :
     Array.isArray(value) ? value.length > 0 : isObject(value) && Object.keys(value).length > 0;
 }
+/**
+ * Render one checkpoint value as inline summary text plus available status, scope, reason, source and evidence details.
+ */
 function describe(value) {
   if (!isObject(value)) return inline(typeof value === 'string' ? value : json(value));
   const text = value.text || value.summary || value.description;
@@ -27,10 +45,16 @@ function describe(value) {
     .map(k => `${k}: ${typeof value[k] === 'string' ? inline(value[k]) : json(value[k])}`);
   return inline(text) + (details.length ? ` (${details.join('; ')})` : '');
 }
+/**
+ * Render a keyed map in sorted Markdown bullet order, or return the supplied empty-state text.
+ */
 function entries(map, empty) {
   const lines = Object.keys(map || {}).sort().map(k => `- ${inline(k)}: ${describe(map[k])}`);
   return lines.length ? lines.join('\n') : empty;
 }
+/**
+ * Collect, deduplicate and sort nonempty source paths, references, URIs and session references from a record.
+ */
 function sourceRefs(record) {
   const refs = [];
   for (const source of Object.values(record.state.sources || {})) {
@@ -41,6 +65,9 @@ function sourceRefs(record) {
   }
   return [...new Set(refs)].sort();
 }
+/**
+ * Check a timezone-bearing ISO timestamp for parseability and real calendar/time components; return false for invalid values.
+ */
 function validTimestamp(value) {
   if (typeof value !== 'string') return false;
   const m = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/);
@@ -50,6 +77,9 @@ function validTimestamp(value) {
   const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
   return mo >= 1 && mo <= 12 && d >= 1 && d <= days[mo - 1] && h <= 23 && mi <= 59 && s <= 59;
 }
+/**
+ * Validate the exact versioned metadata keys, safe identities, timestamp, status and unique source list; throw on contract violations.
+ */
 function validateMetadata(meta) {
   if (Object.keys(meta).length !== META.length || META.some(k => !Object.hasOwn(meta, k))) throw Error('Metadata schema: all required fields must occur once');
   if (meta.schema_version !== 1) throw Error('Metadata schema_version must be 1');
@@ -68,12 +98,20 @@ function validateMetadata(meta) {
   if (!Array.isArray(meta.source_refs) || meta.source_refs.some(v => typeof v !== 'string' || !v.trim() || /[\r\n\0]/.test(v)) ||
       new Set(meta.source_refs).size !== meta.source_refs.length) throw Error('Metadata source_refs must be a deduplicated string list');
 }
+/**
+ * Build and validate frontmatter metadata from a record and its source references; return only the supported schema fields.
+ */
 function metadata(record) {
   const meta = { schema_version: 1, project_id: record.project_id, scope: 'project', session_id: record.session_id,
     checkpoint_id: record.checkpoint_id, parent_checkpoint_id: record.parent_checkpoint_id,
     updated_at: record.created_at, status: record.state.status, source_refs: sourceRefs(record) };
   validateMetadata(meta); return meta;
 }
+/**
+ * Render the seven required handoff sections and preserved JSON state deterministically; display historical completion evidence without declaring reopened work complete.
+ * @param {object} record Checkpoint record with state and versioned metadata.
+ * @returns {string} Markdown document with bounded-schema YAML frontmatter and one DATA fence.
+ */
 function renderMarkdown(record) {
   if (!isObject(record) || !isObject(record.state)) throw Error('Record/state required for Markdown schema');
   if (record.markdown_schema_version !== undefined && record.markdown_schema_version !== 1) throw Error('Unsupported record Markdown schema version');
@@ -106,6 +144,9 @@ function renderMarkdown(record) {
     HEADINGS.map(k => `# ${k}\n\n${sections[k]}\n`).join('\n') +
     '\n# DATA\n\n```json\n' + JSON.stringify(ordered(state), null, 2) + '\n```\n';
 }
+/**
+ * Parse only a supported quoted/plain YAML scalar or null; reject implicit booleans, numeric values and advanced YAML syntax.
+ */
 function scalar(raw) {
   const value = raw.trim();
   if (value.startsWith('"')) {
@@ -122,6 +163,9 @@ function scalar(raw) {
       /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value) || /:\s|\s#/.test(value)) throw Error('Unsupported YAML scalar type or syntax');
   return value;
 }
+/**
+ * Parse the supported flat YAML subset and source_refs list, rejecting duplicate/unknown keys before metadata validation.
+ */
 function parseFrontmatter(lines) {
   const meta = {}, seen = new Set(); let list = false;
   for (const line of lines) {
@@ -148,6 +192,12 @@ function parseFrontmatter(lines) {
   }
   validateMetadata(meta); return meta;
 }
+/**
+ * Parse bounded Markdown with required unique headings and optional DATA state; when expectedRecord is supplied, require exact canonical rendering.
+ * @param {string} text Markdown source, limited to 1 MiB and without NUL bytes.
+ * @param {object} [expectedRecord] Record whose metadata and full rendering must match.
+ * @returns {object} Validated metadata, sections and optional parsed state; throws on malformed or mismatched input.
+ */
 function parseMarkdown(text, expectedRecord) {
   if (typeof text !== 'string' || Buffer.byteLength(text) > 1024 * 1024 || text.includes('\0')) throw Error('Markdown schema requires text up to 1 MiB');
   const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);

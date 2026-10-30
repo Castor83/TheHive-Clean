@@ -10,13 +10,25 @@ const FIELDS = new Set(['goal', 'decisions', 'tasks', 'next_step', 'sources', 'a
   'decision_events', 'blockers', 'events', 'completed']);
 const STATUSES = new Set(['planned', 'implemented', 'tested', 'verified', 'blocked']);
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+/**
+ * Return the hexadecimal SHA-256 of the supplied bytes for persisted integrity checks.
+ */
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+/**
+ * Return whether the value is a non-null, non-array object; prototype validation is separate.
+ */
 const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+/**
+ * Serialize JSON-compatible input with recursively sorted object keys for stable hashes; preserve array order.
+ */
 function canonical(value) {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
   if (object(value)) return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}';
   return JSON.stringify(value);
 }
+/**
+ * Validate JSON values recursively, rejecting unsafe keys, non-finite numbers and excessive depth; throw on invalid input.
+ */
 function checkJson(v, depth = 0) {
   if (depth > 30) throw Error('Schema: nested data too deep');
   if (v === null || typeof v === 'string' || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v))) return;
@@ -27,14 +39,23 @@ function checkJson(v, depth = 0) {
     checkJson(item, depth + 1);
   }
 }
+/**
+ * Validate a filesystem-safe identifier using the supplied error label; reject Windows device names.
+ */
 function identifier(v, label) {
   if (typeof v !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(v) ||
       /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i.test(v)) throw Error(`Schema: invalid ${label}`);
 }
+/**
+ * Return a validated case-insensitive project lookup key with spaces, underscores and hyphens removed.
+ */
 function projectAlias(v) {
   if (typeof v !== 'string' || v.length > 100 || !/^[a-zA-Z0-9][a-zA-Z0-9 _-]*$/.test(v)) throw Error('Schema: invalid project alias');
   return v.toLowerCase().replace(/[ _-]+/g, '');
 }
+/**
+ * Resolve the requested alias against an index; reject ambiguity and allow a new canonical identifier only when create is true.
+ */
 function resolveProjectId(index, requested, create = false) {
   const alias = projectAlias(requested);
   const keys = Object.keys(index.projects).filter(k => projectAlias(k) === alias);
@@ -43,6 +64,9 @@ function resolveProjectId(index, requested, create = false) {
   if (!create) throw Error(`Project not found: ${requested}`);
   identifier(requested, 'new canonical project_id'); return requested;
 }
+/**
+ * Validate the save envelope, allowed patch fields, parent hash and size before any persistence; throw on invalid input.
+ */
 function validate(input) {
   checkJson(input);
   if (!object(input) || input.format_version !== 1) throw Error('Schema: format_version 1 required');
@@ -57,6 +81,9 @@ function validate(input) {
   if (Object.keys(input.patch).some(k => !FIELDS.has(k))) throw Error('Schema: unknown state field; durable promotion is unavailable');
   if (Buffer.byteLength(canonical(input)) > 1024 * 1024) throw Error('Schema: checkpoint exceeds 1 MiB');
 }
+/**
+ * Validate merged goal, next step, sources, statuses and evidence requirements without granting authorization or promoting candidates.
+ */
 function validateState(state) {
   if (typeof state.goal !== 'string' || !state.goal.trim()) throw Error('Schema: goal required');
   if (!object(state.next_step) || !state.next_step.text?.trim() || !state.next_step.success_criterion?.trim()) throw Error('Schema: one next_step and success_criterion required');
@@ -79,6 +106,9 @@ function validateState(state) {
     }
   }
 }
+/**
+ * Return changed fields from after relative to before, recursively comparing keyed objects without mutating either input.
+ */
 function changes(before, after) {
   const diff = {};
   for (const [key, value] of Object.entries(after)) {
@@ -87,6 +117,9 @@ function changes(before, after) {
   }
   return diff;
 }
+/**
+ * Return unique next-map values by canonical content, preferring existing identifiers when aliases duplicate a value.
+ */
 function deduplicateMap(previous, next) {
   const out = {}, seen = new Set();
   // Existing source/event ids win over aliases; preserve the first original binding.
@@ -97,6 +130,9 @@ function deduplicateMap(previous, next) {
   }
   return out;
 }
+/**
+ * Merge a patch into a previous record while preserving source bindings and completion history; require sourced decision, reopen and priority events.
+ */
 function controlledMerge(previous, patch) {
   const old = previous?.state || {}, state = merge(old, patch);
   for (const map of ['sources', 'events']) if (state[map]) state[map] = deduplicateMap(old[map], state[map]);
@@ -163,6 +199,9 @@ function controlledMerge(previous, patch) {
   }
   return state;
 }
+/**
+ * Return the record fields used to compute checkpoint identity; reject unsupported Markdown schema versions.
+ */
 function identity(record) {
   const base = { project_id: record.project_id, session_id: record.session_id, parent_checkpoint_id: record.parent_checkpoint_id,
     created_at: record.created_at, state: record.state };
@@ -172,12 +211,18 @@ function identity(record) {
   }
   return base;
 }
+/**
+ * Return a recursive keyed-object merge; arrays and scalar patch values replace the corresponding old value.
+ */
 function merge(old, patch) {
   const result = { ...old };
   for (const [key, value] of Object.entries(patch)) result[key] = object(value) && object(old[key]) ? merge(old[key], value) : value;
   return result;
 }
 // lstat every existing ancestor: Windows junctions and symlinks must not redirect writes.
+/**
+ * Resolve a path under root and reject escape or any existing symlink/junction ancestor before local file access.
+ */
 function safe(root, relative = '') {
   const abs = path.resolve(root, relative), base = path.resolve(root);
   if (abs !== base && !abs.startsWith(base + path.sep)) throw Error('Path outside handoff root');
@@ -188,8 +233,17 @@ function safe(root, relative = '') {
   }
   return abs;
 }
+/**
+ * Read bytes from a root-relative file after containment and symlink checks; filesystem failures propagate.
+ */
 function read(root, relative) { return fs.readFileSync(safe(root, relative)); }
+/**
+ * Read and parse a root-relative JSON file, tolerating a UTF-8 BOM; path and parse errors propagate.
+ */
 function json(root, relative) { return JSON.parse(read(root, relative).toString('utf8').replace(/^\uFEFF/, '')); }
+/**
+ * Exclusively create a root-relative file, sync its bytes and verify their hash; never overwrite an existing file.
+ */
 function writeNew(root, relative, bytes) {
   const file = safe(root, relative);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -197,11 +251,17 @@ function writeNew(root, relative, bytes) {
   try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   if (sha(fs.readFileSync(file)) !== sha(bytes)) throw Error('Written file hash mismatch');
 }
+/**
+ * Write and verify a unique pending file, then rename it over the root-relative target; failures propagate to callers.
+ */
 function durableReplace(root, relative, bytes) {
   const pending = relative + '.' + crypto.randomUUID() + '.pending';
   writeNew(root, pending, bytes);
   fs.renameSync(safe(root, pending), safe(root, relative));
 }
+/**
+ * Inspect a same-host acquisition gate and invoke the existing Python lock helper only for a proven dead owner; preserve unverifiable ownership.
+ */
 function recoverDeadGate(root) {
   let held;
   try {
@@ -230,6 +290,9 @@ function recoverDeadGate(root) {
   }
   return true;
 }
+/**
+ * Acquire the bounded local writer lock, recover pending transactions and run fn; release only the owned lock and preserve cleanup failures.
+ */
 function withLock(root, fn) {
   safe(root); fs.mkdirSync(root, { recursive: true });
   const file = safe(root, '.writer.lock');
@@ -285,6 +348,9 @@ function withLock(root, fn) {
   if (failed) throw operationError;
   return result;
 }
+/**
+ * Load and validate the store index, or return an empty index when absent; reject project alias collisions.
+ */
 function currentIndex(root) {
   if (!fs.existsSync(safe(root, 'index.json'))) return { format_version: 1, projects: {} };
   const index = json(root, 'index.json'); checkJson(index);
@@ -294,6 +360,9 @@ function currentIndex(root) {
   if (new Set(lower).size !== lower.length) throw Error('Project case collision in index');
   return index;
 }
+/**
+ * Load one indexed project record and verify state, Markdown and immediate parent integrity; return its local verified file metadata.
+ */
 function load(root, projectId, index) {
   const entry = index.projects[projectId];
   if (!entry) throw Error(`Project not found: ${projectId}`);
@@ -315,6 +384,9 @@ function load(root, projectId, index) {
   }
   return { ...record, sha256: entry.sha256, file: safe(root, entry.file), storage_status: 'local_verified' };
 }
+/**
+ * Recover an interrupted publication using index.json as commit point; validate committed targets or restore backups while retaining history.
+ */
 function recover(root) {
   const journalPath = safe(root, '.transaction.json');
   if (!fs.existsSync(journalPath)) return;
@@ -338,6 +410,9 @@ function recover(root) {
   }
   fs.unlinkSync(journalPath);
 }
+/**
+ * Publish staged projection targets with backups and a transaction journal; the final target is the index commit point and failures trigger recovery.
+ */
 function publish(root, targets) {
   const token = crypto.randomUUID(), journal = { format_version: 1, targets: [], index_sha256: sha(targets.at(-1).bytes) };
   for (const item of targets) {
@@ -357,6 +432,12 @@ function publish(root, targets) {
     throw error;
   }
 }
+/**
+ * Validate and merge one sourced save envelope under the writer lock; return unchanged data or publish immutable history and coordinated projections.
+ * @param {string} root Local handoff store directory.
+ * @param {object} input Versioned envelope with expected parent, patch and optional session-bound chat task.
+ * @returns {object} Verified checkpoint with local_verified or unchanged status; throws on conflict or invalid state.
+ */
 function saveCheckpoint(root, input) {
   validate(input);
   return withLock(root, () => {
@@ -398,10 +479,22 @@ function saveCheckpoint(root, input) {
     return { ...load(root, input.project_id, nextIndex), status: 'local_verified' };
   });
 }
+/**
+ * Load the requested project alias under the store lock; integrity checks and pending transaction recovery can write recovery metadata.
+ * @param {string} root Local handoff store directory.
+ * @param {string} projectId Explicit project identifier or unambiguous alias.
+ * @returns {object} Validated indexed checkpoint, never a newest-project fallback.
+ */
 function resumeProject(root, projectId) {
   projectAlias(projectId);
   return withLock(root, () => { const index = currentIndex(root); return load(root, resolveProjectId(index, projectId), index); });
 }
+/**
+ * Return a cloned explicit assignment owned by the record session; reject missing sources, foreign ownership or completed referenced tasks.
+ * @param {object} record Validated checkpoint containing chat_tasks.
+ * @param {string} session Actual owner UUID.
+ * @returns {object} Sourced next-step assignment; throws CHAT_TASK_UNBOUND when no explicit binding exists.
+ */
 function chatTaskForCheckpoint(record, session) {
   const task = record?.state?.chat_tasks?.[session];
   if (!UUID.test(session || '') || record?.session_id !== session || !object(task) || task.owner_session_id !== session ||
@@ -414,6 +507,9 @@ function chatTaskForCheckpoint(record, session) {
       ['tested', 'verified'].includes(record.state.tasks[task.next_step.task_id].status))) throw Error('Chat continuation task is missing or already complete');
   return structuredClone(task);
 }
+/**
+ * Resolve an own-session checkpoint or an explicitly named origin handoff; verify successor journal and optional manual authorization before returning continuation.
+ */
 function resumeChatContinuation(root, options) {
   if (options.handoff_file !== undefined) {
     if (!path.isAbsolute(options.handoff_file)) throw Error('Absolute named handoff required');
@@ -443,8 +539,17 @@ function resumeChatContinuation(root, options) {
   const result = resumeBoundCheckpoint(root, options);
   return { ...result, continuation: chatTaskForCheckpoint(result.checkpoint, options.session_id) };
 }
+/**
+ * Resolve an exact session/workspace checkpoint through verified ancestry, pinning the result to immutable history; never substitute another session latest state.
+ * @param {string} root Local handoff store directory.
+ * @param {object} options Canonical session_id, actual workspace and optional exact snapshot Markdown.
+ * @returns {object} Bound checkpoint and current project record; throws on identity, path, hash or ancestry failure.
+ */
 function resumeBoundCheckpoint(root, { session_id, workspace, markdown } = {}) {
   if (!UUID.test(session_id || '') || session_id !== session_id.toLowerCase()) throw Error('Canonical session required');
+  /**
+   * Canonicalize an explicit local directory for workspace comparisons; reject network paths, missing directories and invalid values.
+   */
   const localWorkspace = value => {
     if (typeof value !== 'string' || !path.isAbsolute(value) || value.includes('\0') ||
         (value.startsWith('\\\\') && !/^\\\\\?\\[a-z]:\\/i.test(value)) || value.startsWith('//')) throw Error('Absolute local workspace required');
@@ -453,10 +558,16 @@ function resumeBoundCheckpoint(root, { session_id, workspace, markdown } = {}) {
     return resolved;
   };
   const expectedWorkspace = localWorkspace(workspace);
+  /**
+   * Require the record workspace, or legacy repository fallback, to canonicalize to the caller workspace; throw on mismatch.
+   */
   const checkWorkspace = record => {
     const git = record.state.git, value = git && Object.hasOwn(git, 'workspace') ? git.workspace : git?.repository;
     if (path.relative(localWorkspace(value), expectedWorkspace) !== '') throw Error('Bound checkpoint workspace mismatch');
   };
+  /**
+   * Read one safe root-relative source with size checks before and after the read; return its bytes or reject growth beyond limit.
+   */
   const boundedRead = (relative, limit) => {
     const file = safe(root, relative);
     if (fs.statSync(file).size > limit) throw Error('Bound checkpoint source exceeds limit');
@@ -501,6 +612,9 @@ function resumeBoundCheckpoint(root, { session_id, workspace, markdown } = {}) {
     throw Error('Bound session ancestry exceeds 128 records');
   });
 }
+/**
+ * Parse explicit save/resume CLI arguments and invoke the existing store; save reads one bounded input envelope and resume requires a project.
+ */
 function main(argv) {
   const command = argv.shift(), args = {};
   for (let i = 0; i < argv.length; i += 2) {

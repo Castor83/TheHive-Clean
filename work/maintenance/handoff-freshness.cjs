@@ -3,22 +3,46 @@ const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypt
 const {TextDecoder}=require('node:util');
 const UUID=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const MAX_PREFIX=128*1024*1024,MAX_SUFFIX=4*1024*1024;
+/**
+ * Return the hexadecimal SHA-256 of transcript bytes for snapshot-prefix verification.
+ */
 const hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
+/**
+ * Throw an error carrying a stable freshnessReason code; never include transcript contents in the code.
+ */
 function fail(reason){const error=Error(reason);error.freshnessReason=reason;throw error;}
+/**
+ * Validate a fully qualified local path and normalize a supported Windows extended prefix; refuse network or NUL-bearing paths.
+ */
 function local(file){
   if(typeof file!=='string'||!file||file.includes('\0'))fail('invalid_local_path');
   if(/^\\\\\?\\[a-z]:[\\/]/i.test(file))file=file.slice(4);
   if(!(/^[a-z]:[\\/]/i.test(file)||(process.platform!=='win32'&&file.startsWith('/')&&!file.startsWith('//')&&!file.startsWith('/\\'))))fail('invalid_local_path');
   return file;
 }
+/**
+ * Resolve an existing filesystem path and revalidate that its canonical target is local.
+ */
 function real(file){return local(fs.realpathSync(local(file)));}
+/**
+ * Return whether the resolved candidate path is equal to root or lexically contained beneath it.
+ */
 function inside(file,root){const relative=path.relative(root,file);return relative===''||(!relative.startsWith('..'+path.sep)&&relative!=='..'&&!path.isAbsolute(relative));}
+/**
+ * Compare size, device, inode and timestamps to detect file replacement or mutation during a read.
+ */
 function sameStat(a,b){return a.size===b.size&&a.dev===b.dev&&a.ino===b.ino&&a.mtimeMs===b.mtimeMs&&a.ctimeMs===b.ctimeMs;}
+/**
+ * Read size bytes at a given descriptor offset, repeating short reads; throw when the requested range cannot be completed.
+ */
 function readExactly(fd,size,position=0){
   const bytes=Buffer.alloc(size);let offset=0;
   while(offset<size){const count=fs.readSync(fd,bytes,offset,size-offset,position+offset);if(!count)fail('short_read');offset+=count;}
   return bytes;
 }
+/**
+ * Read a regular file within limit and verify descriptor/path metadata remained stable; always close the descriptor.
+ */
 function readStable(file,limit){
   const fd=fs.openSync(file,'r');
   try{
@@ -28,7 +52,13 @@ function readStable(file,limit){
     return bytes;
   }finally{fs.closeSync(fd);}
 }
+/**
+ * Decode bytes as strict UTF-8; throw a freshness-coded failure instead of replacing malformed input.
+ */
 function utf8(bytes){try{return new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{fail('invalid_utf8');}}
+/**
+ * Validate complete UTF-8 JSONL records for the bound main session; return the first row and whether any supported user message occurs.
+ */
 function jsonl(bytes,sessionId){
   if(!bytes.length)return {first:null,user:false};
   if(bytes[bytes.length-1]!==0x0a)fail('incomplete_jsonl');
@@ -50,6 +80,11 @@ function jsonl(bytes,sessionId){
   }
   return {first,user};
 }
+/**
+ * Verify the saved transcript copy and live prefix, then inspect only the bounded appended suffix for new user input; return unverifiable on any read or binding failure.
+ * @param {object} args Explicit snapshotPath, codexHome and main-session sessionId.
+ * @returns {object} unchanged, new_user_message or unverifiable status with a reason code; never returns transcript text.
+ */
 function checkSnapshotFreshness(args){
   try{
     if(!args||typeof args!=='object'||Array.isArray(args)||!UUID.test(args.sessionId||''))fail('invalid_arguments');

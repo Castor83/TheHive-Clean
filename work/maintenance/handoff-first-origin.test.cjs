@@ -2,8 +2,14 @@
 // New offline first-origin fixtures only; no live app, hooks or archive operations.
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
 const {saveCheckpoint}=require('./handoff-store.cjs');
+/**
+ * Return the SHA-256 of fixture bytes for controlled integrity assertions.
+ */
 const hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 
+/**
+ * Create an origin checkpoint followed by a parallel update, synthetic snapshots and a fake app; expose counters/race controls without live desktop access.
+ */
 function fixture(t,serial=false){
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'thehive-first-origin-'));
   t.after(()=>{assert.ok(path.resolve(dir).startsWith(path.resolve(os.tmpdir())+path.sep));fs.rmSync(dir,{recursive:true,force:true});});
@@ -19,6 +25,9 @@ function fixture(t,serial=false){
     patch:{last_section:'Parallel work'}});
   const source=path.join(home,'sessions','rollout-'+session+'.jsonl');fs.mkdirSync(path.dirname(source),{recursive:true});
   fs.writeFileSync(source,JSON.stringify({type:'session_meta',payload:{id:session,source:'cli'}})+'\n'+JSON.stringify({type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text:'Synthetic request'}]}})+'\n');
+  /**
+   * Write a synthetic working/transcript snapshot and matching PASS manifest for the supplied checkpoint bytes; return its temporary snapshot directory.
+   */
   function snapshot(name='context-first',markdown=originMarkdown,checkpointId=origin.checkpoint_id){
     const snapshotPath=path.join(home,'handoff-snapshots',session,name);fs.mkdirSync(snapshotPath,{recursive:true});
     const transcript=fs.readFileSync(source);
@@ -47,17 +56,38 @@ function fixture(t,serial=false){
     if(afterIndexRead&&path.resolve(file)===path.join(root,'index.json')){const change=afterIndexRead;afterIndexRead=null;change();}
     return bytes;}};
   const module={exports:{}};
+  /**
+   * Inject fixture policy reads and forbid the live app pipe while loading the adapter dependencies.
+   */
   function localRequire(name){if(name==='node:fs')return policyFs;if(name==='./codex-app-pipe.cjs')throw Error('Live pipe forbidden in offline fixture');return require(name);}
   localRequire.main={};
   new Function('require','module','__dirname','process',fs.readFileSync(adapterFile,'utf8'))(localRequire,module,__dirname,{platform:process.platform,env:{CODEX_HOME:home}});
+  /**
+   * Invoke the isolated adapter with the supplied or default request and fake app; capture pending jobs when serial mode is enabled.
+   */
   const call=(value=input)=>module.exports.ensureSuccessor(value,{app,codexHome:home,schedulePending:serial?job=>jobs.push(job):undefined});
+  /**
+   * Read the fixture origin status journal as JSON for durable-phase assertions.
+   */
   const journal=()=>JSON.parse(fs.readFileSync(path.join(root,session+'-status.json'),'utf8'));
+  /**
+   * Append a synthetic later user message to invalidate the original fixture snapshot.
+   */
   const appendUser=()=>fs.appendFileSync(source,JSON.stringify({type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text:'Synthetic later message'}]}})+'\n');
+  /**
+   * Save a newer own-session checkpoint and then a parallel-session checkpoint to test historical origin selection.
+   */
   function advanceOwnWorking(){
     const own=saveCheckpoint(root,{format_version:1,project_id:'Fixture',session_id:session,expected_parent:current.checkpoint_id,patch:{last_section:'New own work'}});
     current=saveCheckpoint(root,{format_version:1,project_id:'Fixture',session_id:other,expected_parent:own.checkpoint_id,patch:{last_section:'New parallel work'}});
   }
+  /**
+   * Save an own-session checkpoint after the parallel update and return the resulting current record.
+   */
   const returnToOwn=()=>current=saveCheckpoint(root,{format_version:1,project_id:'Fixture',session_id:session,expected_parent:current.checkpoint_id,patch:{last_section:'Own current after parallel update'}});
+  /**
+   * Arm one parallel checkpoint save immediately after the next index read to exercise snapshot/index races.
+   */
   const raceIndexUpdate=()=>{afterIndexRead=()=>{current=saveCheckpoint(root,{format_version:1,project_id:'Fixture',session_id:other,expected_parent:current.checkpoint_id,patch:{last_section:'Parallel save after index read'}});};};
   return {input,home,root,cwd,session,other,child,origin,historicalFile,originMarkdown,source,call,snapshot,journal,appendUser,advanceOwnWorking,returnToOwn,raceIndexUpdate,prompts,creates:()=>creates,jobs,titles,app,archives:()=>archives,navigations:()=>navigations,setOriginStatus:value=>originStatus=value,failNavigation:()=>failNavigation=true,userOnTitle:()=>userOnTitle=true,hideChild:reads=>hiddenReads=reads};
 }

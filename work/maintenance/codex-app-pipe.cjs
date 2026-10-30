@@ -8,7 +8,17 @@ const MAX_FRAME=8*1024*1024;
 const ALLOWED=new Set(['list_projects','list_threads','create_thread','read_thread','wait_threads',
   'navigate_to_codex_page','set_thread_archived','set_thread_title','move_thread_to_project']);
 const UUID=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+/**
+ * Create a stable app-access error carrying whether a request may already have been sent; callers must preserve unknown outcomes.
+ */
 function failure(code,sent=false){const e=Error(code);e.code=code;e.requestMayHaveBeenSent=sent;return e;}
+/**
+ * Send one length-prefixed JSON-RPC request over the existing local named pipe; validate response framing/identity and close the socket on completion without retry.
+ * @param {string} method Native tools/list or tools/call method.
+ * @param {object} params Method parameters bound by the higher-level caller.
+ * @param {object} [options] Existing pipe path and bounded timeout.
+ * @returns {Promise<*>} RPC result, rejecting with a sent-request marker when the outcome may be unknown.
+ */
 function request(method,params,{pipePath=process.env.CODEX_APP_TOOLS_PIPE_PATH,timeoutMs=20000}={}){
   if(typeof pipePath!=='string'||!pipePath.startsWith('\\\\.\\pipe\\'))return Promise.reject(failure('APP_LOCAL_PIPE_UNAVAILABLE'));
   if(!Number.isInteger(timeoutMs)||timeoutMs<1||timeoutMs>60000)return Promise.reject(failure('APP_INVALID_TIMEOUT'));
@@ -18,6 +28,9 @@ function request(method,params,{pipePath=process.env.CODEX_APP_TOOLS_PIPE_PATH,t
   return new Promise((resolve,reject)=>{
     let sent=false,done=false,buffer=Buffer.alloc(0);
     const socket=net.createConnection(pipePath);
+    /**
+     * Settle the pending RPC once, cancel its timer and destroy the socket; reject an error or resolve the supplied result.
+     */
     const finish=(error,result)=>{if(done)return;done=true;clearTimeout(timer);socket.destroy();error?reject(error):resolve(result);};
     const timer=setTimeout(()=>finish(failure('APP_TIMEOUT',sent)),timeoutMs);
     socket.once('connect',()=>{sent=true;socket.write(Buffer.concat([header,body]));});
@@ -40,12 +53,20 @@ function request(method,params,{pipePath=process.env.CODEX_APP_TOOLS_PIPE_PATH,t
     });
   });
 }
+/**
+ * Read and validate the existing desktop tool catalog through the local pipe; reject malformed entries while retaining the sent-request marker.
+ */
 async function listTools(options={}){
   const result=await request('tools/list',{threadStartKind:'all'},options);
   if(!Array.isArray(result?.tools)||result.tools.some(t=>typeof t?.name!=='string'||typeof t.namespace!=='string'||!t.inputSchema))
     throw failure('APP_INVALID_CATALOG',true);
   return result.tools;
 }
+/**
+ * Invoke one allowlisted desktop tool with actual thread/turn/call context; validate its success envelope and never retry an uncertain request.
+ * @param {object} input Tool metadata, arguments, caller UUIDs, callId and optional transport settings.
+ * @returns {Promise<object>} Successful native tool envelope with contentItems; throws on invalid context or remote failure.
+ */
 async function callAppTool({tool,args,threadId,turnId,callId,...options}){
   if(!ALLOWED.has(tool?.name))throw Error('App tool not allowed by the handoff client');
   if(typeof tool.namespace!=='string'||!tool.namespace||!UUID.test(threadId||'')||!UUID.test(turnId||'')||
@@ -57,6 +78,9 @@ async function callAppTool({tool,args,threadId,turnId,callId,...options}){
   if(!result.success)throw failure('APP_TOOL_FAILED',true);
   return result;
 }
+/**
+ * Decode exactly one text result block as JSON; reject unsupported shapes with the sent-request marker intact.
+ */
 function decodeToolResult(result){
   const blocks=result.contentItems.filter(x=>x?.type==='inputText'&&typeof x.text==='string');
   if(blocks.length!==1)throw failure('APP_UNSUPPORTED_RESULT_SHAPE',true);

@@ -3,6 +3,9 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
 const store=require('./handoff-store.cjs');
+/**
+ * Create two session checkpoints in one temporary project and retain original projection bytes for historical-selection and read-only assertions.
+ */
 function fixture(t){
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'thehive-session-checkpoint-'));
   t.after(()=>{assert.equal(path.dirname(dir),fs.realpathSync(os.tmpdir()));fs.rmSync(dir,{recursive:true,force:true});});

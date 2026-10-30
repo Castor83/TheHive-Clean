@@ -8,6 +8,9 @@ const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const bridge = require('./handoff-bridge.cjs');
 
+/**
+ * Write a supplied or default synthetic envelope in a temporary directory and register cleanup; return source and initially absent handoff-root paths.
+ */
 function fixture(t, raw) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'thehive-bridge-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

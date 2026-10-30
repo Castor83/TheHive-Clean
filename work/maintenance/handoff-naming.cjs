@@ -2,16 +2,27 @@
 // Display names only. Existing session IDs and recovery titles remain identities.
 const fs=require('node:fs'),path=require('node:path');
 const UUID=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+/**
+ * Remove a recognized handoff status prefix from a display title and trim it; return empty text for non-strings.
+ */
 function cleanTitle(title){
  if(typeof title!=='string')return '';
  return title.replace(/^\[(?:Hier weiter|Übergabe[^\]]*|Weiterleitung[^\]]*|Wechsel fehlgeschlagen)\]\s*/,'').trim();
 }
+/**
+ * Build a bounded display title from a base and positive safe sequence; preserve identities separately and throw when no base is available.
+ */
 function numberedTitle(base,sequence){
  if(!Number.isSafeInteger(sequence)||sequence<1)throw Error('Invalid chat sequence');
  const suffix=sequence===1?'':' · '+sequence;
  const title=cleanTitle(base);if(!title)throw Error('Original chat title unavailable');
  return Array.from(title).slice(0,230-suffix.length).join('')+suffix;
 }
+/**
+ * Read bounded matching local journals to follow one naming ancestry; return root identity, sequence and titles, rejecting cycles or ambiguous parents.
+ * @param {object} input Origin UUID, exact project/workspace/root binding, optional known sessions and title fallbacks.
+ * @returns {object} Resolved naming metadata for current and successor display titles; journals are read only.
+ */
 function resolveNaming({root,session_id,project_id,workspace,title,sessions,titles={}}){
  if(!UUID.test(session_id||''))throw Error('Actual naming origin required');
  root=fs.realpathSync(root);workspace=fs.realpathSync(workspace);
@@ -48,6 +59,12 @@ function resolveNaming({root,session_id,project_id,workspace,title,sessions,titl
  }
  throw Error('Chat naming chain exceeds bound');
 }
+/**
+ * Resolve local naming first; only when the root title is missing, call readTitle for that exact UUID and retry after identity validation.
+ * @param {object} input Naming context accepted by resolveNaming.
+ * @param {Function} readTitle Asynchronous reader returning the requested thread identity and title.
+ * @returns {Promise<object>} Resolved naming metadata; other lookup failures propagate.
+ */
 async function resolveAppNaming(input,readTitle){
  try{return resolveNaming(input);}catch(error){
   if(error.code!=='ORIGINAL_CHAT_TITLE_UNAVAILABLE')throw error;

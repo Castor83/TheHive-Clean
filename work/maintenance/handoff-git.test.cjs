@@ -13,6 +13,9 @@ test('checkpoint hashes survive a real Git checkout with Windows autocrlf enable
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'thehive-git-'));
   t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
   const root = path.join(repo, 'work', 'handoff');
+  /**
+   * Run Git with autocrlf enabled inside the temporary fixture repository, require success and return the process result.
+   */
   function git(args) {
     const r = spawnSync('git', ['-c', 'core.autocrlf=true', ...args], { cwd: repo, encoding: 'utf8', windowsHide: true });
     assert.equal(r.status, 0, r.stderr); return r;

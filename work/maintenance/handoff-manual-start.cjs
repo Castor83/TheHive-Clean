@@ -2,11 +2,29 @@
 // Native, user-operated chat link. Never creates a chat or changes hook trust.
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const UUID=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+/**
+ * Return a hexadecimal SHA-256 for copied working state and transcript integrity.
+ */
 const digest=b=>crypto.createHash('sha256').update(b).digest('hex');
+/**
+ * Read a JSON metadata file up to 4 MiB with optional UTF-8 BOM; propagate missing-file and parse failures.
+ */
 function read(p){if(fs.statSync(p).size>4*1024*1024)throw Error('Metadata too large');return JSON.parse(fs.readFileSync(p,'utf8').replace(/^\uFEFF/,''));}
+/**
+ * Exclusively write JSON to a unique temporary file, then rename it to the metadata target.
+ */
 function write(p,v){const tmp=p+'.'+crypto.randomUUID()+'.tmp';fs.writeFileSync(tmp,JSON.stringify(v,null,2)+'\n',{flag:'wx'});fs.renameSync(tmp,p);}
+/**
+ * Resolve a fully qualified local path; reject relative and network-path inputs before filesystem access.
+ */
 function real(p){if(typeof p!=='string'||!path.isAbsolute(p)||p.startsWith('\\\\')||p.startsWith('//'))throw Error('Local absolute path required');return fs.realpathSync(p);}
+/**
+ * Return whether a candidate path equals root or has a non-escaping relative path beneath it.
+ */
 function within(p,root){const r=path.relative(root,p);return r===''||(!r.startsWith('..')&&!path.isAbsolute(r));}
+/**
+ * Validate origin, local snapshot containment and working-copy hash, then resolve its exact session/workspace checkpoint; return the bound local context.
+ */
 function bound(input,home){
  if(!UUID.test(input.session_id||''))throw Error('Origin required');
  const root=real(input.handoff_root),cwd=real(input.cwd),dir=real(input.snapshot_path);
@@ -18,6 +36,12 @@ function bound(input,home){
  const cp=require('./handoff-store.cjs').resumeBoundCheckpoint(root,{session_id:input.session_id,workspace:cwd,markdown:working.toString('utf8')}).checkpoint;
  return {root,cwd,dir,manifest,cp,home:real(home)};
 }
+/**
+ * Write an idempotent local offer and manual-start guide for the exact saved chat task; return a user-operated native start URL without creating a chat.
+ * @param {object} input Origin UUID, actual workspace, handoff root and verified snapshot path.
+ * @param {object} [options] Optional local Codex home.
+ * @returns {object} Manual guide path and URL; existing automatic cancellation remains unchanged.
+ */
 function offerManualStart(input,{codexHome=process.env.CODEX_HOME||path.join(require('node:os').homedir(),'.codex')}={}){
  const journalFile=path.join(real(input.handoff_root),input.session_id+'-status.json');
  if(fs.existsSync(journalFile)){
@@ -43,6 +67,9 @@ function offerManualStart(input,{codexHome=process.env.CODEX_HOME||path.join(req
  const prompt=['Projekt-ID: '+b.cp.project_id,'Handoff-Datei: '+guide,'Naechster offener Arbeitsschritt: Ich starte diesen Chat selbst als manuellen Nachfolger. Fuehre die gebundene manuelle Uebernahme aus dieser Datei aus und beruecksichtige meine neueren Nachrichten.'].join('\n');
  return {manual_start_url:'codex://threads/new?path='+encodeURIComponent(b.cwd)+'&prompt='+encodeURIComponent(prompt),manual_start_file:guide};
 }
+/**
+ * Validate the exact manual authorization receipt and unchanged authorized transcript boundary; return local review paths/hash or throw when newer input appears.
+ */
 function manualContext(j,session,home){
  const m=j.manualAuthorization;
  if(!m||m.successor_session_id!==session||m.origin_session_id!==(j.originThreadId||j.origin_thread_id)||m.checkpoint_id!==j.checkpointId)throw Error('No manual successor authorization');
@@ -54,6 +81,9 @@ function manualContext(j,session,home){
  if(fresh.status!=='unchanged')throw Error('New origin message after manual authorization; retain both chats');
  return {transcript_source:fresh.source,transcript_copy:path.join(dir,'transcript.jsonl'),sha256:read(path.join(dir,'manifest.json')).transcript.sha256,original_snapshot_bytes:m.original_snapshot_bytes,snapshot_path:dir};
 }
+/**
+ * Check an exact local move acknowledgement only when the catalog project is still null; return false for foreign caller, workspace or project evidence.
+ */
 function manualProjectMatches(row,authorization,project,cwd){
  try{
   const p=authorization?.project_binding;
@@ -63,6 +93,11 @@ function manualProjectMatches(row,authorization,project,cwd){
    p.threadId===authorization.successor_session_id&&p.projectId===project&&real(p.workspace)===real(cwd));
  }catch{return false;}
 }
+/**
+ * Bind an explicitly human-started actual successor after verifying offer, project membership, idle origin and transcript boundaries; preserve known successors and cancellation.
+ * @param {object} input Explicit human_requested flag, local offer_file and actual turn_id.
+ * @returns {Promise<object>} Existing-successor/origin-busy result or manually bound context; may move/title this caller and persist authorization, never creates a chat.
+ */
 async function acceptManualStart(input){
  if(input.human_requested!==true||!UUID.test(process.env.CODEX_THREAD_ID||'')||!UUID.test(input.turn_id||''))throw Error('Explicit human start and actual successor turn required');
  const offer=read(real(input.offer_file)),home=process.env.CODEX_HOME||path.join(require('node:os').homedir(),'.codex'),b=bound(offer,home),child=process.env.CODEX_THREAD_ID;
@@ -79,6 +114,9 @@ async function acceptManualStart(input){
   if(known&&known!==child)return {status:'existing_successor',successor_thread_id:known};
   if(['creation_intent','creation_unknown','creation_pending'].includes(j.phase))throw Error('Creation outcome unresolved; do not duplicate');
   const app=require('./codex-app-pipe.cjs'),tools=await app.listTools({timeoutMs:5000});
+  /**
+   * Invoke one discovered app tool in the actual manual successor context with a bounded timeout; decode its result and sanitize access failures.
+   */
   async function call(name,args){
    const tool=tools.find(t=>t.name===name);if(!tool)throw Error('App-Zugriff nicht verfuegbar: '+name);
    try{return app.decodeToolResult(await app.callAppTool({tool,args,threadId:child,turnId:input.turn_id,callId:crypto.randomUUID(),timeoutMs:5000}));}
@@ -88,6 +126,9 @@ async function acceptManualStart(input){
   const matches=projects.filter(p=>{try{return p.projectKind==='local'&&p.hostId==='local'&&typeof p.path==='string'&&real(p.path)===b.cwd;}catch{return false;}});
   if(matches.length!==1)throw Error('Exact local app project required');
   const project=matches[0].projectId;
+  /**
+   * Read one bounded thread catalog and return the row for the actual manual successor, including pinned entries.
+   */
   const getChild=async()=>{const catalog=await call('list_threads',{limit:50});return [...(catalog.pinnedThreads||[]),...(catalog.threads||[])].find(t=>(t.threadId||t.id)===child);};
   let childRow=await getChild(),projectBinding=j.manualAuthorization?.project_binding||null;
   // A native path link sets the workspace, not project membership. Attach only
@@ -104,6 +145,9 @@ async function acceptManualStart(input){
   if(!['idle','notLoaded'].includes(origin.thread.status?.type||origin.thread.status))return {status:'origin_busy'};
   const naming=await require('./handoff-naming.cjs').resolveAppNaming({root:b.root,session_id:offer.session_id,project_id:b.cp.project_id,workspace:b.cwd,title:j.originTitle||origin.thread.title||b.cp.project_id},async id=>(await call('read_thread',{threadId:id,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:200})).thread);
   j={...j,naming,originTitle:j.originTitle||origin.thread.title||b.cp.project_id};
+  /**
+   * Revalidate the saved manual context, attempt the successor display title and return binding metadata with the title outcome.
+   */
   async function boundResult(){
    const context=manualContext(read(journal),child,home);
    let naming_title_status='pending';

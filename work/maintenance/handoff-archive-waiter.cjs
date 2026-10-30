@@ -2,6 +2,12 @@
 // One bounded, model-free completion worker. Only read waits repeat; the guarded
 // adapter persists archiveAttemptedAt before the sole archive RPC.
 const {ensureSuccessor}=require('./handoff-desktop.cjs');
+/**
+ * Retry guarded completion only while origin activity or successor visibility is pending; bound attempts/time and use injected pause or existing event waits.
+ * @param {object} input Bound resume_creation or resume_archive adapter request.
+ * @param {object} [options] Injectable adapter, app client, wait limits and pause callback for offline tests.
+ * @returns {Promise<object>} Adapter result or explicit creation fallback; archive errors propagate and no model is launched.
+ */
 async function completePending(input,{complete=ensureSuccessor,app=require('./codex-app-pipe.cjs'),waitMs=45000,maxWaits=input.operation==='resume_creation'?300:12,pause=()=>new Promise(resolve=>setTimeout(resolve,2000))}={}){
   const creation=input.operation==='resume_creation';
   if(!creation&&input.operation!=='resume_archive')throw Error('Completion only');
@@ -29,6 +35,9 @@ async function completePending(input,{complete=ensureSuccessor,app=require('./co
     throw error;
   }
 }
+/**
+ * Build a length-bounded failure display title from persisted naming metadata and a supplied reason; preserve the manual-start instruction.
+ */
 function failureTitle(journal,reason){
   const base=require('./handoff-naming.cjs').cleanTitle(journal?.naming?.current_title||journal?.originTitle||'');
   return ('[Weiterleitung fehlgeschlagen] '+(base?Array.from(base).slice(0,120).join('')+' – ':'')+reason+' – manuellen Start verwenden').slice(0,240);
