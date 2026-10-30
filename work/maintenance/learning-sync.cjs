@@ -248,7 +248,18 @@ function main() {
     const preview = engine(['--dry-run'], started, report, 'preview');
     status.expected_actions = safeSummary(preview, true);
     status.intent_reviews = preview.intent_reviews;
-    if (digest(inputState()) !== digest(state)) throw new Error('Inputs changed during preview; no live pass started');
+    const previewInputs = inputState();
+    if (digest(previewInputs) !== digest(state)) {
+      const changes = {};
+      for (const group of ['brain', 'source']) {
+        changes[group] = [...new Set([...Object.keys(state[group]), ...Object.keys(previewInputs[group])])]
+          .filter(file => digest(state[group][file] ?? null) !== digest(previewInputs[group][file] ?? null)).sort();
+      }
+      changes.runtime = state.runtime !== previewInputs.runtime;
+      changes.adapter = state.adapter !== previewInputs.adapter;
+      writeJson(path.join(report, 'input-changes.json'), changes);
+      throw new Error('Inputs changed during preview; no live pass started');
+    }
     if (!preview.changed) {
       status.status = 'waiting_for_real_evidence';
       status.applied_actions = { new_unconfirmed: [], confirmed: [], moved_to_processed: [] };

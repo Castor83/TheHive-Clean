@@ -16,6 +16,35 @@ test('fixture substitutions reject missing or repeated targets before adapter ex
   assert.throws(()=>replaceOnce('ROOT ROOT','ROOT','safe'),/ambiguous/);
   assert.equal(replaceOnce('ROOT','ROOT','safe'),'safe');
 });
+
+for(const changed of ['brain','source','runtime','adapter','none'])test('preview input diagnostics preserve the mutation guard: '+changed,t=>{
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'hive-preview-inputs-'));
+  t.after(()=>fs.rmSync(base,{recursive:true,force:true}));
+  fs.mkdirSync(path.join(base,'Brain'));fs.writeFileSync(path.join(base,'Brain/_brain.yaml'),'dream:\n  candidate_threshold: 3\n');
+  const before={brain:{'log/a.jsonl':{bytes:1,sha256:'old'}},source:{'cli.ts':{bytes:1,sha256:'old'}},runtime:'old',adapter:'old'};
+  const after=JSON.parse(JSON.stringify(before));
+  if(changed==='brain')after.brain['log/a.jsonl'].sha256='new';
+  else if(changed==='source')after.source['cli.ts'].sha256='new';
+  else if(changed!=='none')after[changed]='new';
+  let source=fs.readFileSync(path.join(__dirname,'learning-sync.cjs'),'utf8');
+  source=replaceOnce(source,"const ROOT = 'C:\\\\TheHive';",'const ROOT = '+JSON.stringify(base)+';');
+  source=replaceOnce(source,'function inputState() {','let fixtureReads=0;\nfunction inputState() { return fixtureReads++ === 0 ? '+JSON.stringify(before)+' : '+JSON.stringify(after)+';');
+  const preview={changed:false,dry_run:true,new_unconfirmed:[],confirmed:[],moved_to_processed:[],retired:[],suppressed:[],warnings:[],uncertain:[],quarantined:[],gated_retires:[],rollups:[],phases:[]};
+  source=replaceOnce(source,"const preview = engine(['--dry-run'], started, report, 'preview');",'const preview = '+JSON.stringify(preview)+';');
+  const adapter=path.join(base,'fixture.cjs');fs.writeFileSync(adapter,source);
+  const result=spawnSync(process.execPath,[adapter,'--preview-only'],{encoding:'utf8',timeout:10000});
+  const status=JSON.parse(result.stdout);
+  if(changed==='none'){assert.equal(result.status,0,result.stderr);assert.equal(status.status,'waiting_for_real_evidence');}
+  else {
+    assert.equal(result.status,1,result.stderr);assert.equal(status.status,'deferred');
+    assert.match(status.error,/Inputs changed during preview/);
+    const diff=JSON.parse(fs.readFileSync(path.join(status.report_dir,'input-changes.json')));
+    assert.deepEqual(diff.brain,changed==='brain'?['log/a.jsonl']:[]);
+    assert.deepEqual(diff.source,changed==='source'?['cli.ts']:[]);
+    assert.equal(diff.runtime,changed==='runtime');assert.equal(diff.adapter,changed==='adapter');
+  }
+  assert.notEqual(JSON.parse(fs.readFileSync(path.join(base,'work/maintenance/learning/status.json'))).live_pass_started,true);
+});
 test('learning lock write failure closes its handle and removes only its own file',t=>{
   const base=fs.mkdtempSync(path.join(os.tmpdir(),'hive-learning-write-'));
   t.after(()=>fs.rmSync(base,{recursive:true,force:true}));
