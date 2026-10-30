@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const { saveCheckpoint, resumeProject } = require('./handoff-store.cjs');
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 function fixture(t) {
@@ -145,9 +145,66 @@ test('an exclusive lock-acquisition guard prevents concurrent stale-lock takeove
   const root = fixture(t), dead = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
   fs.writeFileSync(path.join(root, '.writer.lock'), JSON.stringify({ pid: dead.pid, host: os.hostname() }));
   fs.writeFileSync(path.join(root, '.lock-gate'), JSON.stringify({ pid: process.pid, host: os.hostname() }));
-  assert.throws(() => saveCheckpoint(root, input()), /lock|acquisition/i);
+  assert.throws(() => saveCheckpoint(root, input()), /lock acquisition busy; retry limit reached/i);
+  assert.equal(fs.existsSync(path.join(root, '.lock-gate')), true);
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, '.writer.lock'))).pid, dead.pid);
   assert.equal(fs.existsSync(path.join(root, 'index.json')), false);
+});
+
+test('readers and writers wait for a gate held by another process', async t => {
+  for (const operation of ['read', 'write']) {
+    const root = fixture(t);
+    const first = saveCheckpoint(root, input());
+    const gate = path.join(root, '.lock-gate');
+    fs.writeFileSync(gate, 'held by another process');
+    const script = `const fs = require('node:fs');
+      const store = require(${JSON.stringify(require.resolve('./handoff-store.cjs'))});
+      const open = fs.openSync; let reported = false;
+      fs.openSync = function(file, flags, ...rest) {
+        try { return open.call(this, file, flags, ...rest); }
+        catch (err) {
+          if (!reported && file === ${JSON.stringify(gate)} && err.code === 'EEXIST') {
+            reported = true; fs.writeSync(1, 'busy\\n');
+          }
+          throw err;
+        }
+      };
+      const result = process.argv[2] === 'read'
+        ? store.resumeProject(process.argv[1], 'TheHive')
+        : store.saveCheckpoint(process.argv[1], JSON.parse(process.argv[3]));
+      fs.writeSync(1, JSON.stringify(result) + '\\n');`;
+    const child = spawn(process.execPath, ['-e', script, root, operation, JSON.stringify(input())], { windowsHide: true });
+    t.after(() => child.kill());
+    let output = '', errors = '', released = false;
+    child.stdout.on('data', chunk => {
+      output += chunk;
+      if (!released && output.includes('busy\n')) { released = true; fs.unlinkSync(gate); }
+    });
+    child.stderr.on('data', chunk => { errors += chunk; });
+    const code = await new Promise((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', resolve);
+    });
+    assert.equal(code, 0, errors);
+    assert.equal(released, true, 'operation must encounter the occupied gate');
+    const result = JSON.parse(output.split('\n')[1]);
+    assert.equal(result.checkpoint_id, first.checkpoint_id);
+    assert.equal(fs.existsSync(gate), false);
+  }
+});
+
+test('gate opening errors other than EEXIST are propagated immediately', t => {
+  const root = fixture(t), open = fs.openSync;
+  const denied = Object.assign(new Error('gate access denied'), { code: 'EACCES' });
+  let attempts = 0;
+  fs.openSync = function(file, flags, ...rest) {
+    if (file === path.join(root, '.lock-gate')) { attempts++; throw denied; }
+    return open.call(this, file, flags, ...rest);
+  };
+  try {
+    assert.throws(() => saveCheckpoint(root, input()), err => err === denied);
+    assert.equal(attempts, 1);
+  } finally { fs.openSync = open; }
 });
 
 test('process crash before commit is recovered to previous current and isolated project remains unchanged', t => {
