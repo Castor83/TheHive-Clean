@@ -1,0 +1,48 @@
+name: Windows handoff validation
+
+on:
+  pull_request:
+    branches: [review/source]
+    paths:
+      - .github/workflows/windows-handoff.yml
+      - work/handoff/.gitattributes
+      - work/maintenance/handoff-*.cjs
+
+permissions:
+  contents: read
+
+jobs:
+  handoff:
+    name: Windows handoff (${{ matrix.revision }})
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: [baseline, proposed]
+    steps:
+      - name: Check out the exact revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.revision == 'baseline' && github.event.pull_request.base.sha || github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Verify Windows and report revision
+        shell: pwsh
+        run: |
+          if (-not $IsWindows) { throw 'This validation requires native Windows.' }
+          node --version
+          git rev-parse HEAD
+      - name: Run standalone handoff tests
+        shell: pwsh
+        run: |
+          node --test `
+            work/maintenance/handoff-store.test.cjs `
+            work/maintenance/handoff-format.test.cjs `
+            work/maintenance/handoff-bridge.test.cjs `
+            work/maintenance/handoff-session-checkpoint.test.cjs `
+            work/maintenance/handoff-git.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Windows handoff validation failed.' }
