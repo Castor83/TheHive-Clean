@@ -31,3 +31,7 @@ Am 30.10.2026 in der bereinigten Windows-Arbeitskopie bestanden: 169 Node-Tests 
 Die Quellen-/Navigationstests nutzten die vorhandene Open-Second-Brain-Bibliothek, der Graph-Test die vorhandene Graphify-Installation. Diese Bibliotheken sind nicht Teil der 57 exportierten Originaldateien. Es wurden keine Abhaengigkeiten installiert. Die urspruengliche Windows-CI fuer PR2 war ein getrennter frueherer Nachweis; fuer diese aktualisierte Fassung wird kein neuer GitHub-CI-Lauf behauptet.
 
 Zusaetzlich sind die vorher im Export fehlende handoff-naming.cjs-Abhaengigkeit und vollstaendige synthetische Policy-Dateimetadaten in den Tests enthalten. Ein Pfadvergleich bleibt nach Anonymisierung korrekt. Die private Automatik-Konfiguration bleibt ausgeschlossen.
+
+### Wiederherstellung einer verwaisten Erwerbssperre
+
+Bei nachgewiesen beendetem lokalem Besitzer kann der Store `.lock-gate` jetzt wiederherstellen. `handoff-gate-recovery.py` serialisiert die Wiederherstellung mit der vorhandenen Betriebssystemsperre aus `sync-text-graph.py`; es startet dabei keine Graphwartung und benoetigt kein Graphify. Die Sperre wird bei Prozessende automatisch freigegeben. Alte Gatebytes bleiben als `.lock-gate.stale-*` erhalten. Lebende, fremde oder unklare Besitzer bleiben unangetastet. Nur dieser Wiederherstellungspfad benoetigt ein bereits installiertes Python 3 unter dem Befehl `python`; bei fehlendem Python wird nichts entfernt und eine konkrete Fehlermeldung ausgegeben.

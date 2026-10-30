@@ -57,3 +57,4 @@ work/maintenance/thehive-service.cjs
 work/maintenance/thehive-service.ps1
 work/maintenance/handoff-review-regressions.test.cjs
 work/maintenance/project-knowledge-identity.test.ts
+work/maintenance/handoff-gate-recovery.py

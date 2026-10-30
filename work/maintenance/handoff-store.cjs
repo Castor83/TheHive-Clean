@@ -202,25 +202,58 @@ function durableReplace(root, relative, bytes) {
   writeNew(root, pending, bytes);
   fs.renameSync(safe(root, pending), safe(root, relative));
 }
+function recoverDeadGate(root) {
+  let held;
+  try {
+    const file = safe(root, '.lock-gate');
+    if (fs.statSync(file).size > 4096) return;
+    held = json(root, '.lock-gate');
+  } catch (error) {
+    if (error.code === 'ENOENT' || error instanceof SyntaxError) return;
+    throw error;
+  }
+  if (!held || held.host !== os.hostname() || !Number.isSafeInteger(held.pid) || held.pid <= 0 ||
+      typeof held.token !== 'string' || !held.token) return;
+  try { process.kill(held.pid, 0); return; }
+  catch (error) { if (error.code !== 'ESRCH') return; }
+  // Only the slow, dead-owner path needs Python. All reclaimers serialize with
+  // the existing OS-backed graph publication lock, which releases on crashes.
+  safe(root, '.lock-gate-recovery');
+  const result = require('node:child_process').spawnSync('python',
+    [path.join(__dirname, 'handoff-gate-recovery.py'), path.resolve(root)],
+    { encoding: 'utf8', timeout: 2000, windowsHide: true, maxBuffer: 8192 });
+  let status;
+  try { status = JSON.parse(result.stdout || '{}').status; } catch { /* rejected below */ }
+  if (result.error || result.status !== 0 || !['busy', 'absent', 'retained', 'recovered'].includes(status)) {
+    throw Error('Gate recovery unavailable; preserve .lock-gate and check local Python/helper: ' +
+      (result.error?.code || 'helper failed'));
+  }
+  return true;
+}
 function withLock(root, fn) {
   safe(root); fs.mkdirSync(root, { recursive: true });
   const file = safe(root, '.writer.lock');
   // Serialize acquisition AND stale-owner reclamation. Never move a lock after an
   // unguarded read: a second reclaimer could otherwise steal a new owner's lock.
   const gate = safe(root, '.lock-gate');
-  let gateFd, fd;
+  let gateFd, fd, recoveryAttempted = false;
   const token = crypto.randomUUID();
   const wait = new Int32Array(new SharedArrayBuffer(4));
   for (let retries = 0; ; retries++) {
     gateFd = undefined;
     try { gateFd = fs.openSync(gate, 'wx'); }
-    catch (e) { if (e.code !== 'EEXIST') throw e; }
+    catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      if (!recoveryAttempted) recoveryAttempted = recoverDeadGate(root);
+    }
     if (gateFd !== undefined) try {
     fs.writeFileSync(gateFd, JSON.stringify({ pid: process.pid, host: os.hostname(), token }));
     if (fs.existsSync(file)) {
-      const held = json(root, '.writer.lock');
+      let held;
+      try { held = json(root, '.writer.lock'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
       let alive = true;
-      if (held.host === os.hostname() && Number.isSafeInteger(held.pid)) {
+      if (held?.host === os.hostname() && Number.isSafeInteger(held.pid)) {
         try { process.kill(held.pid, 0); } catch (e) { if (e.code === 'ESRCH') alive = false; }
       }
       if (!alive) fs.renameSync(file, safe(root, '.writer.lock.stale-' + crypto.randomUUID()));
