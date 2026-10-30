@@ -15,3 +15,8 @@ data/
 daten/
 dokumente/
 Chats/
+
+# Generated native watcher status and diagnostics
+work/maintenance/native-index-watch.json
+work/maintenance/*-native-watch.stdout.log
+work/maintenance/*-native-watch.stderr.log
