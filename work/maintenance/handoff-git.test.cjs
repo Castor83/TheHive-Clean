@@ -22,7 +22,8 @@ test('checkpoint hashes survive a real Git checkout with Windows autocrlf enable
     patch: { goal: 'Preserve checkpoint bytes', status: 'implemented', last_section: 'Git persistence',
       sources: { source: { reference: 'A3 hash invariant' } }, next_step: { text: 'Read after checkout', success_criterion: 'Hashes match' } } });
   const attributes = path.join(__dirname, '..', 'handoff', '.gitattributes');
-  if (fs.existsSync(attributes)) fs.copyFileSync(attributes, path.join(root, '.gitattributes'));
+  assert.ok(fs.existsSync(attributes), 'work/handoff/.gitattributes is required');
+  fs.copyFileSync(attributes, path.join(root, '.gitattributes'));
   git(['add', '--', 'work/handoff']);
   git(['-c', 'user.name=Codex test', '-c', 'user.email=codex@localhost', 'commit', '-m', 'fixture']);
   for (const file of git(['ls-files', '-z']).stdout.split('\0').filter(Boolean)) fs.unlinkSync(path.join(repo, file));

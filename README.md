@@ -4,7 +4,9 @@ Technischer Quellstand der lokalen Wartungs- und Handoff-Werkzeuge. Der persoenl
 
 ## Veroeffentlichter Umfang
 
-Bereinigter Dateistand vom 29.10.2026, ohne vorherige Git-Historie. Enthaltene Originaldateien: 51.
+Bereinigter Dateistand vom 29.10.2026, ohne vorherige Git-Historie. Enthaltene Originaldateien: 52.
+
+Ergaenzung vom 30.10.2026: `work/handoff/.gitattributes` schuetzt die Byte-Hashes gespeicherter Arbeitsstaende vor automatischer Zeilenumwandlung durch Git. Der zugehoerige Test verlangt diese Datei ausdruecklich. Gespeicherte private Arbeitsstaende werden weiterhin nicht mitgeliefert.
 
 Persoenliche Notizen, Chats, Uebergaben, Zugangsdaten, lokale Laufzeitdaten, installierte Programme und Modelle werden nicht mitgeliefert. Lokale Benutzernamen wurden in den Releasekopien durch `USER` ersetzt. Die privaten Originalarbeitsbereiche werden separat weitergefuehrt.
 
